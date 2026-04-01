@@ -14,35 +14,37 @@ export interface AuthCallbackPayload {
 type AuthCallbackHandler = (payload: AuthCallbackPayload) => void;
 
 /**
- * Handles the bna-vscode://auth-callback URI that the web app redirects to
- * after the user completes authentication.
+ * Handles the vscode://bna.bna-ai/auth-callback URI.
  *
- * The web app (vscode-login.tsx) redirects to:
- *   bna-vscode://auth-callback?token=XXX&accessToken=YYY&teamSlug=ZZZ&...
+ * VS Code's URI scheme is always:  vscode://<publisher>.<extensionName>/<path>
+ * For this extension: vscode://bna.bna-ai/auth-callback
+ *
+ * The web app redirects to:
+ *   vscode://bna.bna-ai/auth-callback?token=XXX&accessToken=YYY&teamSlug=ZZZ...
  *
  * VS Code intercepts this URI and calls handleUri() here.
  */
 export class BNAUriHandler implements vscode.UriHandler {
   private pendingCallbacks: Set<AuthCallbackHandler> = new Set();
 
-  /**
-   * Called by VS Code when a bna-vscode:// URI is opened.
-   */
   handleUri(uri: vscode.Uri): void {
-    logger.info(`BNAUriHandler: received URI: ${uri.toString()}`);
+    logger.info(`BNAUriHandler.handleUri called: ${uri.toString()}`);
 
-    if (uri.path !== '/auth-callback') {
-      logger.warn(`BNAUriHandler: unexpected path: ${uri.path}`);
+    // Normalise path — VS Code may include or omit the leading slash
+    const path = uri.path.replace(/^\//, '');
+
+    if (path !== 'auth-callback') {
+      logger.warn(`BNAUriHandler: unexpected path "${uri.path}", ignoring`);
       return;
     }
 
     const params = new URLSearchParams(uri.query);
-
     const token = params.get('token');
+
     if (!token) {
       logger.error('BNAUriHandler: no token in callback URI');
       vscode.window.showErrorMessage(
-        'Sign-in failed: no token received. Please try again.',
+        'BNA sign-in failed: no token received. Please try again.',
       );
       return;
     }
@@ -58,26 +60,23 @@ export class BNAUriHandler implements vscode.UriHandler {
     };
 
     logger.info(
-      `BNAUriHandler: auth callback received, teamSlug=${payload.teamSlug}`,
+      `BNAUriHandler: auth callback received` +
+        ` teamSlug=${payload.teamSlug ?? '(none)'}` +
+        ` hasAccessToken=${!!payload.accessToken}`,
     );
 
-    // Notify all waiting callbacks
     for (const cb of this.pendingCallbacks) {
       try {
         cb(payload);
       } catch (err) {
-        logger.error('BNAUriHandler: callback error:', err);
+        logger.error('BNAUriHandler: callback threw:', err);
       }
     }
     this.pendingCallbacks.clear();
   }
 
-  /**
-   * Wait for the next auth callback.
-   * Returns a promise that resolves when the deep link is received,
-   * or rejects after the timeout.
-   */
-  waitForCallback(timeoutMs = 180_000): Promise<AuthCallbackPayload> {
+  /** Register a one-shot listener that resolves on the next callback. */
+  waitForCallback(timeoutMs = 300_000): Promise<AuthCallbackPayload> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingCallbacks.delete(handler);
@@ -93,9 +92,6 @@ export class BNAUriHandler implements vscode.UriHandler {
     });
   }
 
-  /**
-   * Cancel any pending callbacks (e.g. user cancelled sign-in).
-   */
   cancelPending(): void {
     this.pendingCallbacks.clear();
   }

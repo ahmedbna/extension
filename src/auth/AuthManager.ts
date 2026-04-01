@@ -6,18 +6,11 @@ import { logger } from '../utils/logger';
 import * as crypto from 'crypto';
 
 /**
- * Manages authentication for BNA.
- *
- * Sign-in flow:
- * 1. Generate a unique session_id
- * 2. Open the BNA web app at /vscode-login?session_id=XXX&redirect=bna-vscode://auth-callback
- * 3. User logs in with Google/GitHub on the web app
- * 4. Web app redirects to bna-vscode://auth-callback?token=XXX&accessToken=YYY&teamSlug=ZZZ...
- * 5. VS Code intercepts the URI via BNAUriHandler and resolves the promise
- * 6. Fallback: simultaneously poll /api/vscode-auth?session_id=XXX (for environments
- *    where deep links may not work, e.g. remote SSH, WSL)
- * 7. Token is stored in VS Code SecretStorage (OS keychain)
+ * The redirect URI VS Code handles for this extension.
+ * Format: vscode://<publisher>.<extensionName>/<path>
  */
+const VSCODE_REDIRECT_URI = 'vscode://bna.bna-ai/auth-callback';
+
 export class AuthManager {
   private _onAuthStateChanged = new vscode.EventEmitter<boolean>();
   readonly onAuthStateChanged = this._onAuthStateChanged.event;
@@ -29,28 +22,18 @@ export class AuthManager {
     private readonly tokenStore: TokenStore,
     private readonly uriHandler: BNAUriHandler,
   ) {
-    // Forward token store auth events
     this.tokenStore.onAuthChanged((isAuth) => {
       this._onAuthStateChanged.fire(isAuth);
     });
   }
 
-  /**
-   * Check if user is authenticated with a valid token.
-   */
   async isAuthenticated(): Promise<boolean> {
     return this.tokenStore.isAuthenticated();
   }
 
-  /**
-   * Validate the current token against the server.
-   * Returns user info if valid, null otherwise.
-   */
   async validateToken(): Promise<{ userId: string; email?: string } | null> {
     const token = await this.tokenStore.getConvexAuthToken();
-    if (!token) {
-      return null;
-    }
+    if (!token) return null;
 
     try {
       const response = await fetch(
@@ -76,18 +59,15 @@ export class AuthManager {
         }
       }
 
-      // 404 → validate endpoint doesn't exist, fall back to local JWT check
       if (response.status === 404) {
         const isValid = await this.tokenStore.isAuthenticated();
         if (isValid) {
           return { userId: (await this.tokenStore.getUserId()) || 'unknown' };
         }
       }
-
       return null;
     } catch (err) {
-      logger.debug('Token validation request failed:', String(err));
-      // Network error — fall back to local JWT check
+      logger.debug('Token validation failed:', String(err));
       const isValid = await this.tokenStore.isAuthenticated();
       return isValid
         ? { userId: (await this.tokenStore.getUserId()) || 'unknown' }
@@ -95,47 +75,39 @@ export class AuthManager {
     }
   }
 
-  /**
-   * Initialize auth on extension startup.
-   * Validates stored token and attempts refresh if needed.
-   */
   async initialize(): Promise<boolean> {
     const hasToken = await this.tokenStore.hasStoredToken();
     if (!hasToken) {
-      logger.info('No stored auth token — user needs to sign in');
       this._onAuthStateChanged.fire(false);
       return false;
     }
 
     const isValid = await this.tokenStore.isAuthenticated();
     if (isValid) {
-      logger.info('Auth token is valid');
       this._onAuthStateChanged.fire(true);
       this.startTokenRefreshTimer();
       return true;
     }
 
-    // Token stored but expired — try refresh
-    logger.info('Auth token expired, attempting refresh...');
     const refreshed = await this.tryRefreshToken();
     if (refreshed) {
-      logger.info('Token refreshed successfully');
       this._onAuthStateChanged.fire(true);
       this.startTokenRefreshTimer();
       return true;
     }
 
-    logger.info('Token refresh failed — user needs to re-authenticate');
     this._onAuthStateChanged.fire(false);
     return false;
   }
 
   /**
-   * Initiates the sign-in flow.
-   *
-   * Opens the BNA web app in the browser. VS Code intercepts the
-   * bna-vscode://auth-callback deep link when the web app redirects back.
-   * We also poll as a fallback (for SSH/WSL environments).
+   * Sign-in flow:
+   * 1. Open browser → https://ai.ahmedbna.com/vscode-login?session_id=XXX&redirect=vscode://bna.bna-ai/auth-callback
+   * 2. User authenticates on the web app
+   * 3. Web app redirects to vscode://bna.bna-ai/auth-callback?token=...
+   * 4. VS Code routes the URI to our registered BNAUriHandler
+   * 5. BNAUriHandler resolves the waitForCallback() promise
+   * 6. Simultaneously poll /api/vscode-auth as fallback (SSH / WSL / Linux)
    */
   async signIn(): Promise<boolean> {
     if (this.isSigningIn) {
@@ -148,26 +120,28 @@ export class AuthManager {
 
     try {
       const sessionId = crypto.randomUUID();
-      const redirectUri = 'bna-vscode://auth-callback';
 
       const loginUrl =
         `${BNA_API_BASE_URL}/vscode-login` +
         `?session_id=${encodeURIComponent(sessionId)}` +
-        `&redirect=${encodeURIComponent(redirectUri)}`;
+        `&redirect=${encodeURIComponent(VSCODE_REDIRECT_URI)}`;
 
       logger.info(`Opening sign-in URL: ${loginUrl}`);
 
       const opened = await vscode.env.openExternal(vscode.Uri.parse(loginUrl));
       if (!opened) {
-        vscode.window.showErrorMessage('Failed to open browser for sign-in.');
+        vscode.window.showErrorMessage(
+          'Failed to open browser. Please try again.',
+        );
         return false;
       }
 
-      // Race: deep-link callback vs. polling fallback
+      // Race deep-link vs polling — whichever arrives first wins
       const result = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'Waiting for sign-in to complete in browser...',
+          title:
+            'Waiting for sign-in… Complete it in your browser then return here.',
           cancellable: true,
         },
         async (_progress, cancellationToken) => {
@@ -176,15 +150,13 @@ export class AuthManager {
           });
 
           return Promise.race([
-            // Primary: deep-link from the browser
-            this.uriHandler.waitForCallback(180_000),
-            // Fallback: polling (for SSH/WSL/remote environments)
-            this.pollForToken(sessionId, 180_000),
+            this.uriHandler.waitForCallback(300_000),
+            this.pollForToken(sessionId, 300_000),
           ]);
         },
       );
 
-      if (!result || !result.token) {
+      if (!result?.token) {
         vscode.window.showErrorMessage('Sign-in timed out or was cancelled.');
         return false;
       }
@@ -192,11 +164,8 @@ export class AuthManager {
       await this.storeAuthResult(result);
       return true;
     } catch (err: any) {
-      if (
-        err.message?.includes('timed out') ||
-        err.message?.includes('cancelled')
-      ) {
-        vscode.window.showErrorMessage('Sign-in timed out or was cancelled.');
+      if (err?.message?.includes('timed out')) {
+        vscode.window.showErrorMessage('Sign-in timed out. Please try again.');
       } else {
         logger.error('Sign-in error:', err);
         vscode.window.showErrorMessage(`Sign-in failed: ${err.message}`);
@@ -207,9 +176,6 @@ export class AuthManager {
     }
   }
 
-  /**
-   * Store the result of a successful auth (deep link or poll).
-   */
   private async storeAuthResult(result: {
     token: string;
     userId?: string;
@@ -237,87 +203,59 @@ export class AuthManager {
 
     this._onAuthStateChanged.fire(true);
     this.startTokenRefreshTimer();
-
     vscode.window.showInformationMessage('Successfully signed in to BNA!');
     logger.info('User signed in successfully');
   }
 
   /**
-   * Fallback: poll the BNA API for the token.
-   * Used when deep links are unavailable (SSH, WSL, remote).
+   * Fallback polling — resolves if the web app stored the token server-side.
+   * Used when deep links are unavailable (SSH remote, WSL, some Linux DEs).
    */
   private async pollForToken(
     sessionId: string,
-    timeoutMs = 180_000,
-  ): Promise<
-    | {
-        token: string;
-        userId?: string;
-        accessToken?: string;
-        teamSlug?: string;
-        teamName?: string;
-        teamId?: string;
-        memberId?: string;
-      }
-    | never
-  > {
-    const pollUrl = `${BNA_API_BASE_URL}/api/vscode-auth?session_id=${encodeURIComponent(sessionId)}`;
-    const startTime = Date.now();
-    const pollInterval = 2000;
+    timeoutMs = 300_000,
+  ): Promise<{ token: string; [key: string]: any }> {
+    const url = `${BNA_API_BASE_URL}/api/vscode-auth?session_id=${encodeURIComponent(sessionId)}`;
+    const deadline = Date.now() + timeoutMs;
 
-    while (Date.now() - startTime < timeoutMs) {
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
       try {
-        const response = await fetch(pollUrl);
-
-        if (response.ok) {
-          const data = (await response.json()) as any;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = (await res.json()) as any;
           if (data?.token) {
             logger.info('pollForToken: token received via polling');
             return data;
           }
-        } else if (response.status >= 500) {
-          logger.warn('Server error during auth poll:', response.status);
         }
       } catch (err) {
         logger.debug('Poll attempt failed:', String(err));
       }
-
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
     }
 
-    // Let the deep-link win the race by never resolving (timeout handled by Promise.race)
-    return new Promise(() => {}); // never resolves — let the race timeout naturally
+    // Never reject — let the deep-link side win; the Progress cancellation
+    // handles the user-cancelled case.
+    return new Promise(() => {});
   }
 
-  /**
-   * Try to refresh an expired token.
-   */
   private async tryRefreshToken(): Promise<boolean> {
     try {
       const rawToken = await this.tokenStore.getRawConvexAuthToken();
-      if (!rawToken) {
-        return false;
-      }
+      if (!rawToken) return false;
 
-      const response = await fetch(
-        `${BNA_API_BASE_URL}/api/vscode-auth/refresh`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${rawToken}`,
-          },
-        },
-      );
+      const res = await fetch(`${BNA_API_BASE_URL}/api/vscode-auth/refresh`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${rawToken}` },
+      });
 
-      if (response.ok) {
-        const data = (await response.json()) as { token?: string };
+      if (res.ok) {
+        const data = (await res.json()) as { token?: string };
         if (data.token) {
           await this.tokenStore.setConvexAuthToken(data.token);
           return true;
         }
       }
-
       return false;
     } catch (err) {
       logger.debug('Token refresh failed:', String(err));
@@ -325,32 +263,20 @@ export class AuthManager {
     }
   }
 
-  /**
-   * Periodically verify token validity and attempt refresh.
-   */
   private startTokenRefreshTimer(): void {
     this.stopTokenRefreshTimer();
-
     this.refreshTimer = setInterval(
       async () => {
         const isValid = await this.tokenStore.isAuthenticated();
         if (!isValid) {
-          logger.info('Token expired during session, attempting refresh...');
           const refreshed = await this.tryRefreshToken();
           if (!refreshed) {
-            logger.warn('Token refresh failed — user needs to re-authenticate');
             this._onAuthStateChanged.fire(false);
             this.stopTokenRefreshTimer();
-
             vscode.window
-              .showWarningMessage(
-                'Your BNA session has expired. Please sign in again.',
-                'Sign In',
-              )
-              .then((choice) => {
-                if (choice === 'Sign In') {
-                  this.signIn();
-                }
+              .showWarningMessage('Your BNA session has expired.', 'Sign In')
+              .then((c) => {
+                if (c === 'Sign In') this.signIn();
               });
           }
         }
@@ -366,33 +292,21 @@ export class AuthManager {
     }
   }
 
-  /**
-   * Ensure user is authenticated, prompting to sign in if not.
-   */
   async ensureAuthenticated(): Promise<boolean> {
-    const isAuth = await this.isAuthenticated();
-    if (isAuth) {
-      return true;
-    }
-
+    if (await this.isAuthenticated()) return true;
     const choice = await vscode.window.showInformationMessage(
       'You need to sign in to BNA to continue.',
       'Sign In',
       'Cancel',
     );
-
     return choice === 'Sign In' ? this.signIn() : false;
   }
 
-  /**
-   * Sign out and clear all stored tokens.
-   */
   async signOut(): Promise<void> {
     this.stopTokenRefreshTimer();
     await this.tokenStore.clearAll();
     this._onAuthStateChanged.fire(false);
     vscode.window.showInformationMessage('Signed out of BNA.');
-    logger.info('User signed out');
   }
 
   dispose(): void {
