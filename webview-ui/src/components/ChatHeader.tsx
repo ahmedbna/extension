@@ -3,9 +3,10 @@ import React from 'react';
 interface Props {
   onNewChat: () => void;
   onConnectConvex: () => void;
+  onSignOut: () => void;
 }
 
-export function ChatHeader({ onNewChat, onConnectConvex }: Props) {
+export function ChatHeader({ onNewChat, onConnectConvex, onSignOut }: Props) {
   return (
     <div style={styles.header}>
       <div style={styles.left}>
@@ -13,11 +14,18 @@ export function ChatHeader({ onNewChat, onConnectConvex }: Props) {
         <span style={styles.title}>BNA</span>
       </div>
       <div style={styles.right}>
-        <button style={styles.btn} onClick={onConnectConvex} title="Connect Convex">
+        <button
+          style={styles.btn}
+          onClick={onConnectConvex}
+          title='Connect Convex'
+        >
           🔗
         </button>
-        <button style={styles.btn} onClick={onNewChat} title="New Chat">
+        <button style={styles.btn} onClick={onNewChat} title='New Chat'>
           ＋
+        </button>
+        <button style={styles.btn} onClick={onSignOut} title='Sign Out'>
+          ↪
         </button>
       </div>
     </div>
@@ -30,7 +38,8 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: '8px 12px',
-    borderBottom: '1px solid var(--vscode-widget-border, rgba(255,255,255,0.1))',
+    borderBottom:
+      '1px solid var(--vscode-widget-border, rgba(255,255,255,0.1))',
     flexShrink: 0,
   },
   left: {

@@ -1,7 +1,12 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { TokenStore } from '../auth/TokenStore';
-import { ToolExecutor, type ToolCall, type ToolResult } from '../tools/ToolExecutor';
+import { AuthManager } from '../auth/AuthManager';
+import {
+  ToolExecutor,
+  type ToolCall,
+  type ToolResult,
+} from '../tools/ToolExecutor';
 import { CreditsManager } from '../credits/CreditsManager';
 import { ConvexProjectManager } from '../convex/ConvexProjectManager';
 import { executeFileTool } from '../tools/FileTools';
@@ -23,7 +28,14 @@ export interface ChatMessage {
 }
 
 export interface StreamEvent {
-  type: 'text' | 'tool-call' | 'tool-result' | 'finish' | 'error' | 'file-write';
+  type:
+    | 'text'
+    | 'tool-call'
+    | 'tool-result'
+    | 'finish'
+    | 'error'
+    | 'file-write'
+    | 'auth-required';
   content?: string;
   toolCall?: ToolCall;
   toolResult?: ToolResult;
@@ -34,11 +46,11 @@ export interface StreamEvent {
 /**
  * The main BNA AI agent.
  *
- * Unlike the web app which calls /api/chat (a Remix server action),
- * the VS Code extension calls the Anthropic API directly using the
- * same prompts and tool definitions.
+ * Calls the BNA API (/api/chat) which handles system prompts, tool definitions,
+ * and credit tracking. The extension executes tool calls locally on the real FS.
  *
- * Alternatively, it can proxy through the BNA API for credit tracking.
+ * Auth-aware: validates token before each request and fires auth-required events
+ * when the token is invalid or expired.
  */
 export class BNAAgent {
   private messages: ChatMessage[] = [];
@@ -52,23 +64,27 @@ export class BNAAgent {
 
   constructor(
     private readonly tokenStore: TokenStore,
+    private readonly authManager: AuthManager,
     private readonly toolExecutor: ToolExecutor,
     private readonly creditsManager: CreditsManager,
-    private readonly projectManager: ConvexProjectManager
+    private readonly projectManager: ConvexProjectManager,
   ) {
     this.chatId = crypto.randomUUID();
     this.messageHistory = new MessageHistory();
 
     this.artifactParser = new StreamingArtifactParser({
       onFileComplete: (file) => {
-        if (EXCLUDED_FILE_PATHS.some(ex => file.filePath.includes(ex))) {
+        if (EXCLUDED_FILE_PATHS.some((ex) => file.filePath.includes(ex))) {
           logger.warn(`Skipping excluded file: ${file.filePath}`);
           return;
         }
-        executeFileTool(file.filePath, file.content).catch(err => {
+        executeFileTool(file.filePath, file.content).catch((err) => {
           logger.error(`Failed to write file ${file.filePath}:`, err);
         });
-        this._onStreamEvent.fire({ type: 'file-write', filePath: file.filePath });
+        this._onStreamEvent.fire({
+          type: 'file-write',
+          filePath: file.filePath,
+        });
       },
     });
   }
@@ -83,13 +99,19 @@ export class BNAAgent {
 
   /**
    * Send a user message and stream the AI response.
-   * Uses the BNA API endpoint which handles:
-   * - System prompts (same as web app)
-   * - Tool definitions
-   * - Credit deduction
-   * - Message history management
+   * Validates auth before making the request.
    */
   async sendMessage(userMessage: string): Promise<void> {
+    // ── Auth gate ──────────────────────────────────────────────
+    const isAuth = await this.authManager.isAuthenticated();
+    if (!isAuth) {
+      this._onStreamEvent.fire({
+        type: 'auth-required',
+        error: 'Please sign in to continue.',
+      });
+      return;
+    }
+
     // Add user message
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -105,17 +127,33 @@ export class BNAAgent {
       await this.callBNAApi(this.abortController.signal);
     } catch (err: any) {
       if (err.name === 'AbortError') {
-        this._onStreamEvent.fire({ type: 'finish', content: 'Stopped by user' });
+        this._onStreamEvent.fire({
+          type: 'finish',
+          content: 'Stopped by user',
+        });
         return;
       }
+
+      // Check if the error is auth-related
+      if (this.isAuthError(err)) {
+        logger.warn('Auth error during API call — token may be expired');
+        this._onStreamEvent.fire({
+          type: 'auth-required',
+          error: 'Your session has expired. Please sign in again.',
+        });
+        return;
+      }
+
       logger.error('Agent error:', err);
-      this._onStreamEvent.fire({ type: 'error', error: err.message || String(err) });
+      this._onStreamEvent.fire({
+        type: 'error',
+        error: err.message || String(err),
+      });
     }
   }
 
   /**
    * Call the BNA API (same endpoint as the web app's /api/chat).
-   * This ensures the same system prompts, tool definitions, and credit tracking.
    */
   private async callBNAApi(signal: AbortSignal): Promise<void> {
     const token = await this.tokenStore.getConvexAuthToken();
@@ -124,20 +162,26 @@ export class BNAAgent {
     const userId = await this.tokenStore.getUserId();
     const projectInfo = this.projectManager.getProjectInfo();
 
-    if (!accessToken || !teamSlug) {
-      throw new Error('Not connected to Convex. Please sign in and connect your Convex account.');
+    if (!token) {
+      throw new AuthError('No valid auth token. Please sign in.');
     }
 
-    // Prepare request body (same shape as the web app's experimental_prepareRequestBody)
+    if (!accessToken || !teamSlug) {
+      throw new Error(
+        'Not connected to Convex. Please connect your Convex account.',
+      );
+    }
+
     const body = {
-      messages: this.messages.map(m => ({
+      messages: this.messages.map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
         parts: m.parts,
         annotations: m.annotations,
       })),
-      firstUserMessage: this.messages.filter(m => m.role === 'user').length === 1,
+      firstUserMessage:
+        this.messages.filter((m) => m.role === 'user').length === 1,
       chatInitialId: this.chatId,
       token: accessToken,
       teamSlug,
@@ -155,10 +199,15 @@ export class BNAAgent {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify(body),
       signal,
     });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new AuthError('Authentication failed. Please sign in again.');
+    }
 
     if (!response.ok) {
       const text = await response.text();
@@ -169,15 +218,16 @@ export class BNAAgent {
       throw new Error('No response body');
     }
 
-    // Process the SSE stream
     await this.processStream(response.body, signal);
   }
 
   /**
    * Process the Server-Sent Events stream from the BNA API.
-   * The stream format matches the Vercel AI SDK's data stream protocol.
    */
-  private async processStream(body: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<void> {
+  private async processStream(
+    body: ReadableStream<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<void> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
 
@@ -194,19 +244,24 @@ export class BNAAgent {
 
     try {
       while (true) {
-        if (signal.aborted) break;
+        if (signal.aborted) {
+          break;
+        }
 
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Process complete lines from the SSE stream
         const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
-          if (!line.trim()) continue;
+          if (!line.trim()) {
+            continue;
+          }
 
           try {
             await this.processStreamLine(line, currentAssistantMsg, signal);
@@ -219,15 +274,14 @@ export class BNAAgent {
       reader.releaseLock();
     }
 
-    // Finalize
     this._onStreamEvent.fire({ type: 'finish' });
   }
 
   /**
    * Process a single line from the data stream.
-   * The Vercel AI SDK data stream protocol uses single-character prefixes:
+   * Vercel AI SDK data stream protocol:
    * 0: text delta
-   * 2: data (annotations, etc.)
+   * 2: data (annotations)
    * 9: tool call
    * a: tool result
    * e: finish
@@ -236,30 +290,26 @@ export class BNAAgent {
   private async processStreamLine(
     line: string,
     assistantMsg: ChatMessage,
-    signal: AbortSignal
+    signal: AbortSignal,
   ): Promise<void> {
-    if (line.length < 2) return;
+    if (line.length < 2) {
+      return;
+    }
 
     const type = line[0];
-    const data = line.slice(2); // Skip type char and colon
+    const data = line.slice(2);
 
     switch (type) {
       case '0': {
-        // Text delta
         try {
           const text = JSON.parse(data) as string;
           assistantMsg.content += text;
 
-          // Parse through the artifact parser — it strips boltArtifact/boltAction tags
-          // and emits file-write events when complete files are found
           const cleanText = this.artifactParser.feed(text);
-
-          // Only emit the cleaned text (artifact tags stripped) to the UI
           if (cleanText) {
             this._onStreamEvent.fire({ type: 'text', content: cleanText });
           }
         } catch {
-          // Raw text
           assistantMsg.content += data;
           this._onStreamEvent.fire({ type: 'text', content: data });
         }
@@ -267,7 +317,6 @@ export class BNAAgent {
       }
 
       case '9': {
-        // Tool call
         try {
           const toolCall = JSON.parse(data) as {
             toolCallId: string;
@@ -284,7 +333,6 @@ export class BNAAgent {
             },
           });
 
-          // Execute the tool
           if (!signal.aborted) {
             const result = await this.toolExecutor.execute({
               toolCallId: toolCall.toolCallId,
@@ -304,7 +352,6 @@ export class BNAAgent {
       }
 
       case '2': {
-        // Data/annotations (usage, model info, etc.)
         try {
           const annotations = JSON.parse(data) as any[];
           if (assistantMsg.annotations) {
@@ -317,19 +364,31 @@ export class BNAAgent {
       }
 
       case 'e': {
-        // Finish reason
         this._onStreamEvent.fire({ type: 'finish' });
         break;
       }
 
       case 'd': {
-        // Error
         try {
           const errorData = JSON.parse(data);
-          this._onStreamEvent.fire({
-            type: 'error',
-            error: typeof errorData === 'string' ? errorData : JSON.stringify(errorData),
-          });
+          const errorMsg =
+            typeof errorData === 'string'
+              ? errorData
+              : JSON.stringify(errorData);
+
+          // Check if server reported auth error in the stream
+          if (
+            errorMsg.includes('auth') ||
+            errorMsg.includes('unauthorized') ||
+            errorMsg.includes('token')
+          ) {
+            this._onStreamEvent.fire({
+              type: 'auth-required',
+              error: 'Session expired. Please sign in again.',
+            });
+          } else {
+            this._onStreamEvent.fire({ type: 'error', error: errorMsg });
+          }
         } catch {
           this._onStreamEvent.fire({ type: 'error', error: data });
         }
@@ -339,8 +398,23 @@ export class BNAAgent {
   }
 
   /**
-   * Abort the current generation.
+   * Check if an error is authentication-related.
    */
+  private isAuthError(err: any): boolean {
+    if (err instanceof AuthError) {
+      return true;
+    }
+    const msg = (err.message || String(err)).toLowerCase();
+    return (
+      msg.includes('401') ||
+      msg.includes('403') ||
+      msg.includes('unauthorized') ||
+      msg.includes('authentication') ||
+      msg.includes('token expired') ||
+      msg.includes('sign in')
+    );
+  }
+
   abort(): void {
     if (this.abortController) {
       this.abortController.abort();
@@ -349,9 +423,6 @@ export class BNAAgent {
     this.artifactParser.flush();
   }
 
-  /**
-   * Reset the chat (new conversation).
-   */
   reset(): void {
     this.messages = [];
     this.chatId = crypto.randomUUID();
@@ -359,16 +430,10 @@ export class BNAAgent {
     this.artifactParser.reset();
   }
 
-  /**
-   * Save current messages locally.
-   */
   async saveHistory(): Promise<void> {
     await this.messageHistory.saveLocal(this.chatId, this.messages);
   }
 
-  /**
-   * Load messages from local history.
-   */
   async loadHistory(): Promise<boolean> {
     const stored = await this.messageHistory.loadLocal();
     if (stored) {
@@ -382,5 +447,15 @@ export class BNAAgent {
   dispose(): void {
     this.abort();
     this._onStreamEvent.dispose();
+  }
+}
+
+/**
+ * Custom error class for auth-related failures.
+ */
+class AuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthError';
   }
 }

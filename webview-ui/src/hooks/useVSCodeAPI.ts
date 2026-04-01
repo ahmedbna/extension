@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
-/** The VS Code API object acquired by acquireVsCodeApi(). */
 interface VSCodeAPI {
   postMessage(message: any): void;
   getState(): any;
@@ -27,7 +26,8 @@ export type ExtensionMessage =
   | { type: 'streamEnd' }
   | { type: 'error'; error: string }
   | { type: 'chatReset' }
-  | { type: 'authState'; isAuthenticated: boolean };
+  | { type: 'authState'; isAuthenticated: boolean }
+  | { type: 'authRequired'; error: string };
 
 export interface ChatMsg {
   id: string;
@@ -35,9 +35,6 @@ export interface ChatMsg {
   content: string;
 }
 
-/**
- * Hook for communicating with the VS Code extension host.
- */
 export function useVSCodeAPI() {
   const api = useRef(getVSCodeAPI());
 
@@ -45,9 +42,12 @@ export function useVSCodeAPI() {
     api.current.postMessage(message);
   }, []);
 
-  const sendMessage = useCallback((text: string) => {
-    postMessage({ type: 'sendMessage', text });
-  }, [postMessage]);
+  const sendMessage = useCallback(
+    (text: string) => {
+      postMessage({ type: 'sendMessage', text });
+    },
+    [postMessage],
+  );
 
   const stopGeneration = useCallback(() => {
     postMessage({ type: 'stopGeneration' });
@@ -80,9 +80,6 @@ export function useVSCodeAPI() {
   };
 }
 
-/**
- * Hook to listen for messages from the extension host.
- */
 export function useExtensionMessages(handler: (msg: ExtensionMessage) => void) {
   useEffect(() => {
     const listener = (event: MessageEvent<ExtensionMessage>) => {

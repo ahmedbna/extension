@@ -120,22 +120,22 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^1.2.12",
+    "@convex-dev/auth": "^0.0.90",
+    "ai": "^4.3.2",
     "convex": "^1.27.0",
     "convex-helpers": "^0.1.79",
-    "@convex-dev/auth": "^0.0.90",
-    "@ai-sdk/anthropic": "^1.2.12",
-    "ai": "^4.3.2",
-    "open": "^10.1.0",
     "node-fetch": "^3.3.2",
+    "open": "^10.1.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/node": "^20.19.37",
     "@types/vscode": "^1.85.0",
-    "@types/node": "^20.17.30",
-    "esbuild": "^0.25.3",
+    "@vscode/vsce": "^3.0.0",
     "concurrently": "^8.2.0",
+    "esbuild": "^0.25.3",
     "typescript": "~5.7.3",
-    "vitest": "^2.1.9",
-    "@vscode/vsce": "^3.0.0"
+    "vitest": "^2.1.9"
   }
 }

@@ -102,7 +102,7 @@ code --install-extension bna-ai-0.1.0.vsix
 
 1. Click the **BNA** icon in the Activity Bar (left sidebar)
 2. Click **"Sign In to Get Started"**
-3. Your browser opens to `ai.ahmedbna.com/desktop-login`
+3. Your browser opens to `ai.ahmedbna.com/vscode-login`
 4. Sign in with Google or GitHub
 5. The extension automatically picks up your auth token
 
@@ -274,7 +274,7 @@ processStream()
 
 ## Authentication Flow
 
-The extension reuses the web app's **desktop auth route** (`/desktop-login`):
+The extension reuses the web app's **vscode auth route** (`/vscode-login`):
 
 ```
 Extension                        Browser                         BNA Server
@@ -284,9 +284,9 @@ Extension                        Browser                         BNA Server
    │                                ├── User logs in (Google/GitHub)─►│
    │                                │◄── Auth completed ─────────────┤
    │                                ├── Store token ────────────────►│
-   │                                │   (desktopAuthSessions table)  │
+   │                                │   (vscodeAuthSessions table)  │
    │                                │                                │
-   ├── Poll /api/desktop-auth ─────────────────────────────────────►│
+   ├── Poll /api/vscode-auth ─────────────────────────────────────►│
    │◄── Token returned ──────────────────────────────────────────────┤
    ├── Store in SecretStorage       │                                │
    └── Authenticated ✓             │                                │
@@ -355,7 +355,7 @@ npm test
 - Tool definitions and parameters (`bna-agent/tools/`)
 - Credit calculation logic (`app/lib/common/usage.ts`)
 - Convex schema and backend functions (`convex/`)
-- Auth flow using `desktopAuthSessions`
+- Auth flow using `vscodeAuthSessions`
 - API endpoint (`/api/chat`) — same SSE stream protocol
 
 ### What was replaced:

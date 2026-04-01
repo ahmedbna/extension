@@ -28,7 +28,7 @@ let chatProvider: ChatWebviewProvider;
 export function activate(context: vscode.ExtensionContext) {
   logger.info('BNA extension activating...');
 
-  // ── Initialize core services ────────────────────────────────────────────
+  // ── Initialize core services ──────────────────────────────────────────
   tokenStore = new TokenStore(context.secrets);
   authManager = new AuthManager(tokenStore);
 
@@ -41,29 +41,37 @@ export function activate(context: vscode.ExtensionContext) {
   creditsManager = new CreditsManager(tokenStore);
   terminalManager = new TerminalManager();
   toolExecutor = new ToolExecutor(terminalManager, projectManager);
-  agent = new BNAAgent(tokenStore, toolExecutor, creditsManager, projectManager);
 
-  // ── Chat Webview ────────────────────────────────────────────────────────
+  // Agent now takes authManager for auth-gated requests
+  agent = new BNAAgent(
+    tokenStore,
+    authManager,
+    toolExecutor,
+    creditsManager,
+    projectManager,
+  );
+
+  // ── Chat Webview ──────────────────────────────────────────────────────
   chatProvider = new ChatWebviewProvider(
     context.extensionUri,
     agent,
     authManager,
-    creditsManager
+    creditsManager,
   );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(WEBVIEW_VIEW_TYPE, chatProvider, {
       webviewOptions: { retainContextWhenHidden: true },
-    })
+    }),
   );
 
-  // ── Register commands ───────────────────────────────────────────────────
+  // ── Register commands ─────────────────────────────────────────────────
 
-  // Open chat panel (also focuses it if already open)
+  // Open chat panel
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.openChat', () => {
       vscode.commands.executeCommand(`${WEBVIEW_VIEW_TYPE}.focus`);
-    })
+    }),
   );
 
   // Sign in
@@ -72,32 +80,26 @@ export function activate(context: vscode.ExtensionContext) {
       const success = await authManager.signIn();
       if (success) {
         creditsManager.updateStatusBar();
-        // Also try loading the Convex OAuth connection
         await tryLoadConvexConnection();
       }
-    })
+    }),
   );
 
   // Sign out
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.signOut', async () => {
       await authManager.signOut();
+      agent.reset();
       creditsManager.updateStatusBar();
-    })
+    }),
   );
 
   // Connect Convex
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.connectConvex', async () => {
-      const isAuth = await authManager.isAuthenticated();
+      // Ensure authenticated first
+      const isAuth = await authManager.ensureAuthenticated();
       if (!isAuth) {
-        const choice = await vscode.window.showInformationMessage(
-          'You need to sign in to BNA first.',
-          'Sign In'
-        );
-        if (choice === 'Sign In') {
-          await authManager.signIn();
-        }
         return;
       }
 
@@ -114,85 +116,92 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // Check if project already exists
       const existing = await projectManager.loadExistingProject();
       if (existing) {
         vscode.window.showInformationMessage(
-          `Already connected to Convex project: ${existing.deploymentName}`
+          `Already connected to Convex project: ${existing.deploymentName}`,
         );
         return;
       }
 
-      // Create a new project
       const name = await vscode.window.showInputBox({
         prompt: 'Project name for your Convex deployment',
         value: 'BNA App',
       });
-      if (!name) return;
+      if (!name) {
+        return;
+      }
 
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Creating Convex project...' },
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Creating Convex project...',
+        },
         async () => {
           const info = await projectManager.initializeProject(name);
           if (info) {
             vscode.window.showInformationMessage(
-              `Convex project created: ${info.projectSlug}`
+              `Convex project created: ${info.projectSlug}`,
             );
           }
-        }
+        },
       );
-    })
+    }),
   );
 
   // New project from template
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.newProject', async () => {
-      const isAuth = await authManager.isAuthenticated();
+      const isAuth = await authManager.ensureAuthenticated();
       if (!isAuth) {
-        const choice = await vscode.window.showInformationMessage(
-          'Sign in to BNA to create a new project.',
-          'Sign In'
-        );
-        if (choice === 'Sign In') {
-          await authManager.signIn();
-        }
         return;
       }
 
       const scaffolder = new TemplateScaffolder(tokenStore, projectManager);
       await scaffolder.scaffold();
-    })
+    }),
   );
 
   // View credits
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.viewCredits', async () => {
+      const isAuth = await authManager.isAuthenticated();
+      if (!isAuth) {
+        vscode.window.showInformationMessage('Sign in to view your credits.');
+        return;
+      }
+
       const info = await creditsManager.fetchCredits();
       if (!info) {
-        vscode.window.showInformationMessage('Sign in to view your credits.');
+        vscode.window.showInformationMessage('Could not fetch credits.');
         return;
       }
 
       const choice = await vscode.window.showInformationMessage(
         `BNA Credits: ${info.credits} remaining (${info.totalCreditsUsed} used)`,
-        'Buy More'
+        'Buy More',
       );
       if (choice === 'Buy More') {
         vscode.commands.executeCommand('bna.buyCredits');
       }
-    })
+    }),
   );
 
-  // Buy credits — opens web page
+  // Buy credits
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.buyCredits', () => {
       vscode.env.openExternal(vscode.Uri.parse(`${BNA_API_BASE_URL}/credits`));
-    })
+    }),
   );
 
   // Deploy
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.deploy', async () => {
+      const isAuth = await authManager.ensureAuthenticated();
+      if (!isAuth) {
+        return;
+      }
+
       const root = getWorkspaceRoot();
       if (!root) {
         vscode.window.showErrorMessage('Open a workspace folder first.');
@@ -201,7 +210,9 @@ export function activate(context: vscode.ExtensionContext) {
 
       const hasConvex = await hasConvexProject();
       if (!hasConvex) {
-        vscode.window.showErrorMessage('No Convex project found in this workspace.');
+        vscode.window.showErrorMessage(
+          'No Convex project found in this workspace.',
+        );
         return;
       }
 
@@ -214,31 +225,34 @@ export function activate(context: vscode.ExtensionContext) {
         async () => {
           const result = await terminalManager.convexDeploy();
           if (result.exitCode === 0) {
-            vscode.window.showInformationMessage('Deployed to Convex successfully!');
+            vscode.window.showInformationMessage(
+              'Deployed to Convex successfully!',
+            );
           } else {
             vscode.window.showErrorMessage(
-              `Deploy failed. Check the terminal for details.`
+              'Deploy failed. Check the terminal for details.',
             );
           }
-        }
+        },
       );
-    })
+    }),
   );
 
-  // ── Terminal cleanup ────────────────────────────────────────────────────
+  // ── Terminal cleanup ──────────────────────────────────────────────────
   context.subscriptions.push(terminalManager.registerTerminalCloseHandler());
 
-  // ── Status bar ──────────────────────────────────────────────────────────
+  // ── Status bar ────────────────────────────────────────────────────────
   creditsManager.updateStatusBar();
 
-  // ── Auto-load existing project on activation ────────────────────────────
-  initializeOnActivation().catch(err => {
+  // ── Initialize auth on startup ────────────────────────────────────────
+  initializeOnActivation().catch((err) => {
     logger.error('Initialization error:', err);
   });
 
-  // ── File watcher for .env.local changes ─────────────────────────────────
+  // ── File watcher ──────────────────────────────────────────────────────
   if (getWorkspaceRoot()) {
-    const envWatcher = vscode.workspace.createFileSystemWatcher('**/.env.local');
+    const envWatcher =
+      vscode.workspace.createFileSystemWatcher('**/.env.local');
     envWatcher.onDidChange(() => {
       projectManager.loadExistingProject().catch(() => {});
     });
@@ -248,7 +262,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(envWatcher);
   }
 
-  // ── Disposables ─────────────────────────────────────────────────────────
+  // ── Disposables ───────────────────────────────────────────────────────
   context.subscriptions.push({
     dispose: () => {
       agent.dispose();
@@ -256,6 +270,7 @@ export function activate(context: vscode.ExtensionContext) {
       terminalManager.dispose();
       convexClient.dispose();
       authManager.dispose();
+      tokenStore.dispose();
       logger.dispose();
     },
   });
@@ -270,12 +285,15 @@ export function deactivate() {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 async function initializeOnActivation(): Promise<void> {
-  // Try to load existing auth
-  const isAuth = await authManager.isAuthenticated();
+  // Initialize auth — validates token, attempts refresh if expired
+  const isAuth = await authManager.initialize();
+
   if (!isAuth) {
-    logger.info('User not authenticated');
+    logger.info('User not authenticated — showing sign-in prompt');
     return;
   }
+
+  logger.info('User authenticated');
 
   // Try loading Convex connection
   await tryLoadConvexConnection();
@@ -287,6 +305,12 @@ async function initializeOnActivation(): Promise<void> {
     if (existing) {
       logger.info(`Loaded existing Convex project: ${existing.deploymentName}`);
     }
+  }
+
+  // Fetch and show credits
+  const credits = await creditsManager.fetchCredits();
+  if (credits) {
+    creditsManager.setCachedCredits(credits.credits);
   }
 }
 

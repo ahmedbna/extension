@@ -25,13 +25,13 @@ interface ToolEvent {
 export function App() {
   const api = useVSCodeAPI();
 
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null); // null = loading
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('ready');
   const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // Accumulate streamed text for the current assistant message
   const streamingTextRef = useRef('');
   const streamingMsgIdRef = useRef<string | null>(null);
 
@@ -39,7 +39,8 @@ export function App() {
     switch (msg.type) {
       case 'init': {
         setIsAuthenticated(msg.isAuthenticated);
-        if (msg.messages?.length) {
+        setAuthError(null);
+        if (msg.isAuthenticated && msg.messages?.length) {
           setMessages(msg.messages);
         }
         break;
@@ -47,6 +48,21 @@ export function App() {
 
       case 'authState': {
         setIsAuthenticated(msg.isAuthenticated);
+        if (msg.isAuthenticated) {
+          setAuthError(null);
+        }
+        break;
+      }
+
+      case 'authRequired': {
+        // Session expired — show auth screen with message
+        setIsAuthenticated(false);
+        setAuthError(
+          msg.error || 'Your session has expired. Please sign in again.',
+        );
+        setStreamStatus('ready');
+        streamingMsgIdRef.current = null;
+        streamingTextRef.current = '';
         break;
       }
 
@@ -58,35 +74,34 @@ export function App() {
           const id = `assistant-${Date.now()}`;
           streamingMsgIdRef.current = id;
           streamingTextRef.current = '';
-          setMessages(prev => [...prev, { id, role: 'assistant', content: '' }]);
+          setMessages((prev) => [
+            ...prev,
+            { id, role: 'assistant', content: '' },
+          ]);
         }
 
         streamingTextRef.current += msg.text;
         const currentId = streamingMsgIdRef.current;
         const currentText = streamingTextRef.current;
 
-        setMessages(prev =>
-          prev.map(m =>
-            m.id === currentId ? { ...m, content: currentText } : m
-          )
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === currentId ? { ...m, content: currentText } : m,
+          ),
         );
         break;
       }
 
       case 'toolCall': {
-        setToolEvents(prev => [
+        setToolEvents((prev) => [
           ...prev,
-          {
-            id: msg.toolCallId,
-            type: 'call',
-            toolName: msg.toolName,
-          },
+          { id: msg.toolCallId, type: 'call', toolName: msg.toolName },
         ]);
         break;
       }
 
       case 'toolResult': {
-        setToolEvents(prev => [
+        setToolEvents((prev) => [
           ...prev,
           {
             id: msg.toolCallId,
@@ -99,13 +114,9 @@ export function App() {
       }
 
       case 'fileWrite': {
-        setToolEvents(prev => [
+        setToolEvents((prev) => [
           ...prev,
-          {
-            id: `file-${Date.now()}`,
-            type: 'file',
-            filePath: msg.filePath,
-          },
+          { id: `file-${Date.now()}`, type: 'file', filePath: msg.filePath },
         ]);
         break;
       }
@@ -114,7 +125,6 @@ export function App() {
         setStreamStatus('ready');
         streamingMsgIdRef.current = null;
         streamingTextRef.current = '';
-        // Clear tool events after a delay
         setTimeout(() => setToolEvents([]), 3000);
         break;
       }
@@ -141,7 +151,6 @@ export function App() {
 
   useExtensionMessages(handleExtensionMessage);
 
-  // Tell extension we're ready
   useEffect(() => {
     api.postMessage({ type: 'ready' });
   }, [api]);
@@ -149,13 +158,13 @@ export function App() {
   const handleSend = useCallback(
     (text: string) => {
       const id = `user-${Date.now()}`;
-      setMessages(prev => [...prev, { id, role: 'user', content: text }]);
+      setMessages((prev) => [...prev, { id, role: 'user', content: text }]);
       setStreamStatus('streaming');
       setError(null);
       setToolEvents([]);
       api.sendMessage(text);
     },
-    [api]
+    [api],
   );
 
   const handleStop = useCallback(() => {
@@ -163,8 +172,24 @@ export function App() {
     setStreamStatus('ready');
   }, [api]);
 
+  const handleSignIn = useCallback(() => {
+    setAuthError(null);
+    api.signIn();
+  }, [api]);
+
+  // Loading state — show nothing until we know auth status
+  if (isAuthenticated === null) {
+    return (
+      <div style={styles.loading}>
+        <span style={{ fontSize: 24 }}>⚡</span>
+        <p style={{ opacity: 0.4, fontSize: 12 }}>Loading...</p>
+      </div>
+    );
+  }
+
+  // Not authenticated — show sign in
   if (!isAuthenticated) {
-    return <AuthPrompt onSignIn={api.signIn} />;
+    return <AuthPrompt onSignIn={handleSignIn} authError={authError} />;
   }
 
   return (
@@ -172,6 +197,7 @@ export function App() {
       <ChatHeader
         onNewChat={api.newChat}
         onConnectConvex={api.connectConvex}
+        onSignOut={api.signOut}
       />
 
       <MessageList
@@ -186,9 +212,12 @@ export function App() {
             status={streamStatus}
             error={error}
             onRetry={() => {
-              // Resend last user message
-              const lastUser = [...messages].reverse().find(m => m.role === 'user');
-              if (lastUser) handleSend(lastUser.content);
+              const lastUser = [...messages]
+                .reverse()
+                .find((m) => m.role === 'user');
+              if (lastUser) {
+                handleSend(lastUser.content);
+              }
             }}
           />
         )}
@@ -218,5 +247,13 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: 6,
+  },
+  loading: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100vh',
+    gap: 8,
   },
 };

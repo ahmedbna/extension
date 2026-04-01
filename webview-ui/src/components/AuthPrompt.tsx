@@ -1,10 +1,20 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 interface Props {
   onSignIn: () => void;
+  authError?: string | null;
 }
 
-export function AuthPrompt({ onSignIn }: Props) {
+export function AuthPrompt({ onSignIn, authError }: Props) {
+  const [isSigningIn, setIsSigningIn] = useState(false);
+
+  const handleSignIn = () => {
+    setIsSigningIn(true);
+    onSignIn();
+    // Reset after timeout in case sign-in doesn't complete
+    setTimeout(() => setIsSigningIn(false), 60000);
+  };
+
   return (
     <div style={styles.container}>
       <div style={styles.logoSection}>
@@ -17,12 +27,32 @@ export function AuthPrompt({ onSignIn }: Props) {
         Sign in to start building Expo + Convex apps with AI
       </p>
 
-      <button style={styles.signInBtn} onClick={onSignIn}>
-        Sign In to Get Started
+      {authError && (
+        <div style={styles.errorBanner}>
+          <span style={styles.errorIcon}>⚠</span>
+          <span style={styles.errorText}>{authError}</span>
+        </div>
+      )}
+
+      <button
+        style={{
+          ...styles.signInBtn,
+          ...(isSigningIn ? styles.signInBtnDisabled : {}),
+        }}
+        onClick={handleSignIn}
+        disabled={isSigningIn}
+      >
+        {isSigningIn
+          ? 'Waiting for browser...'
+          : authError
+            ? 'Sign In to Continue'
+            : 'Sign In to Get Started'}
       </button>
 
       <p style={styles.note}>
-        Opens your browser for secure authentication
+        {isSigningIn
+          ? 'Complete sign-in in your browser, then return here'
+          : 'Opens your browser for secure authentication'}
       </p>
     </div>
   );
@@ -64,7 +94,29 @@ const styles: Record<string, React.CSSProperties> = {
     opacity: 0.6,
     maxWidth: 240,
     lineHeight: '1.5',
-    marginBottom: 16,
+    marginBottom: 8,
+  },
+  errorBanner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    background: 'rgba(239, 68, 68, 0.1)',
+    border: '1px solid rgba(239, 68, 68, 0.25)',
+    borderRadius: 8,
+    padding: '8px 14px',
+    marginBottom: 8,
+    maxWidth: 280,
+  },
+  errorIcon: {
+    color: '#ef4444',
+    fontSize: 14,
+    flexShrink: 0,
+  },
+  errorText: {
+    color: 'rgba(239, 68, 68, 0.9)',
+    fontSize: 12,
+    textAlign: 'left' as const,
+    lineHeight: '1.4',
   },
   signInBtn: {
     background: '#FAD40B',
@@ -76,10 +128,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     cursor: 'pointer',
     transition: 'opacity 0.15s',
+    marginTop: 4,
+  },
+  signInBtnDisabled: {
+    opacity: 0.6,
+    cursor: 'wait',
   },
   note: {
     fontSize: 11,
     opacity: 0.35,
     marginTop: 8,
+    maxWidth: 240,
+    lineHeight: '1.4',
   },
 };
