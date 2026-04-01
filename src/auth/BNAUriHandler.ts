@@ -9,6 +9,7 @@ export interface AuthCallbackPayload {
   teamId?: string;
   memberId?: string;
   userId?: string;
+  convexOnly?: string;
 }
 
 type AuthCallbackHandler = (payload: AuthCallbackPayload) => void;
@@ -16,13 +17,18 @@ type AuthCallbackHandler = (payload: AuthCallbackPayload) => void;
 /**
  * Handles the vscode://bna.bna-ai/auth-callback URI.
  *
- * VS Code's URI scheme is always:  vscode://<publisher>.<extensionName>/<path>
- * For this extension: vscode://bna.bna-ai/auth-callback
+ * This single handler covers two flows:
  *
- * The web app redirects to:
- *   vscode://bna.bna-ai/auth-callback?token=XXX&accessToken=YYY&teamSlug=ZZZ...
+ *   1. Full sign-in  (vscode-login.tsx)
+ *      ?token=BNA_JWT&accessToken=CONVEX_TOKEN&teamSlug=...
  *
- * VS Code intercepts this URI and calls handleUri() here.
+ *   2. Convex-only OAuth reconnect  (vscode-convex-callback.tsx)
+ *      ?convexOnly=true&accessToken=CONVEX_TOKEN&teamSlug=...&session_id=...
+ *      (no BNA JWT — token field will be empty / absent)
+ *
+ * For case 2 we synthesise a dummy token so the existing AuthCallbackPayload
+ * shape is satisfied, but callers that care about convexOnly will check the
+ * flag and ignore the token field.
  */
 export class BNAUriHandler implements vscode.UriHandler {
   private pendingCallbacks: Set<AuthCallbackHandler> = new Set();
@@ -30,7 +36,6 @@ export class BNAUriHandler implements vscode.UriHandler {
   handleUri(uri: vscode.Uri): void {
     logger.info(`BNAUriHandler.handleUri called: ${uri.toString()}`);
 
-    // Normalise path — VS Code may include or omit the leading slash
     const path = uri.path.replace(/^\//, '');
 
     if (path !== 'auth-callback') {
@@ -40,27 +45,43 @@ export class BNAUriHandler implements vscode.UriHandler {
 
     const params = new URLSearchParams(uri.query);
     const token = params.get('token');
+    const accessToken = params.get('accessToken') ?? undefined;
+    const convexOnly = params.get('convexOnly') ?? undefined;
 
-    if (!token) {
-      logger.error('BNAUriHandler: no token in callback URI');
+    // For the Convex-only flow there is no BNA token — that's fine.
+    if (!token && convexOnly !== 'true') {
+      logger.error(
+        'BNAUriHandler: no token in callback URI and not a convexOnly callback',
+      );
       vscode.window.showErrorMessage(
         'BNA sign-in failed: no token received. Please try again.',
       );
       return;
     }
 
+    if (convexOnly === 'true' && !accessToken) {
+      logger.error('BNAUriHandler: convexOnly callback missing accessToken');
+      vscode.window.showErrorMessage(
+        'Convex connection failed: no access token received. Please try again.',
+      );
+      return;
+    }
+
     const payload: AuthCallbackPayload = {
-      token,
-      accessToken: params.get('accessToken') ?? undefined,
+      // Use a sentinel string so the type is satisfied; callers check convexOnly
+      token: token ?? '__convex_only__',
+      accessToken,
       teamSlug: params.get('teamSlug') ?? undefined,
       teamName: params.get('teamName') ?? undefined,
       teamId: params.get('teamId') ?? undefined,
       memberId: params.get('memberId') ?? undefined,
       userId: params.get('userId') ?? undefined,
+      convexOnly,
     };
 
     logger.info(
-      `BNAUriHandler: auth callback received` +
+      `BNAUriHandler: callback received` +
+        ` convexOnly=${convexOnly ?? 'false'}` +
         ` teamSlug=${payload.teamSlug ?? '(none)'}` +
         ` hasAccessToken=${!!payload.accessToken}`,
     );
