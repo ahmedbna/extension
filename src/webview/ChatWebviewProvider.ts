@@ -218,6 +218,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     const logoUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'bricks.png'),
     );
+    const convexUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'media', 'convex.png'),
+    );
 
     const nonce = getNonce();
 
@@ -426,9 +429,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
           <span>BNA</span>
         </div>
         <div class="bna-header-right">
-          <button class="bna-header-btn" id="btn-connect" title="Connect Convex">🔗</button>
-          <button class="bna-header-btn" id="btn-new-chat" title="New Chat">＋</button>
-          <button class="bna-header-btn" id="btn-sign-out" title="Sign Out">↪</button>
+          <button class="bna-header-btn" id="btn-connect" title="Connect Convex"><img src="${convexUri}" alt="Connect Convex" /></button>
+          <button class="bna-header-btn" id="btn-new-chat" title="New Chat">💬</button>
+          <button class="bna-header-btn" id="btn-sign-out" title="Sign Out">🛑</button>
         </div>
       </div>
 

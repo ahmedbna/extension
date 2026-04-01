@@ -97,57 +97,24 @@ export function activate(context: vscode.ExtensionContext) {
       if (!isAuth) return;
 
       const hasConnection = await tokenStore.hasConvexConnection();
-
       if (!hasConnection) {
-        // Launch the OAuth browser flow — no workspace needed for this step
-        const connected = await convexOAuth.connectTeam();
-        if (!connected) return;
-
-        // Only offer project creation if a workspace folder is open
-        const root = getWorkspaceRoot();
-        if (!root) {
-          vscode.window.showInformationMessage(
-            'Convex connected! Open a project folder and run "BNA: Connect Convex Project" again to link a Convex deployment.',
-          );
-          return;
-        }
-
-        const existing = await projectManager.loadExistingProject();
-        if (existing) {
-          vscode.window.showInformationMessage(
-            `Convex connected and project already linked: ${existing.deploymentName}`,
-          );
-          return;
-        }
-
-        const name = await vscode.window.showInputBox({
-          prompt: 'Project name for your Convex deployment',
-          value: 'BNA App',
-        });
-        if (!name) return;
-
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Creating Convex project...',
-          },
-          async () => {
-            const info = await projectManager.initializeProject(name);
-            if (info) {
-              vscode.window.showInformationMessage(
-                `Convex project created: ${info.projectSlug}`,
-              );
-            }
-          },
-        );
+        // No stored connection — open browser OAuth flow
+        await convexOAuth.connectTeam();
         return;
       }
 
-      // Already has a Convex OAuth connection — just need to link/create a project
-      // which requires a workspace to write .env.local
+      // Has a stored OAuth token but may need to create/link a project.
+      // Only NOW do we need a workspace (to write .env.local).
       const root = getWorkspaceRoot();
       if (!root) {
-        vscode.window.showErrorMessage('Open a workspace folder first.');
+        // No workspace open — offer to reconnect Convex account or bail
+        const choice = await vscode.window.showInformationMessage(
+          'Convex account already connected. Open a project folder to create a Convex deployment.',
+          'Reconnect Convex Account',
+        );
+        if (choice === 'Reconnect Convex Account') {
+          await convexOAuth.connectTeam();
+        }
         return;
       }
 
