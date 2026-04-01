@@ -1,0 +1,141 @@
+{
+  "name": "bna-ai",
+  "displayName": "BNA - AI Mobile App Builder",
+  "description": "Build fullstack Expo React Native + Convex apps with AI",
+  "version": "0.1.0",
+  "publisher": "bna",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "ai",
+    "react-native",
+    "expo",
+    "convex",
+    "mobile"
+  ],
+  "activationEvents": [
+    "onCommand:bna.openChat",
+    "onCommand:bna.signIn",
+    "workspaceContains:**/convex/schema.ts"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "media/bricks.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "bna.openChat",
+        "title": "BNA: Open AI Chat",
+        "icon": {
+          "light": "media/bricks.png",
+          "dark": "media/bricks.png"
+        }
+      },
+      {
+        "command": "bna.signIn",
+        "title": "BNA: Sign In"
+      },
+      {
+        "command": "bna.signOut",
+        "title": "BNA: Sign Out"
+      },
+      {
+        "command": "bna.connectConvex",
+        "title": "BNA: Connect Convex Project"
+      },
+      {
+        "command": "bna.newProject",
+        "title": "BNA: New Project from Template"
+      },
+      {
+        "command": "bna.viewCredits",
+        "title": "BNA: View Credits"
+      },
+      {
+        "command": "bna.buyCredits",
+        "title": "BNA: Buy Credits"
+      },
+      {
+        "command": "bna.deploy",
+        "title": "BNA: Deploy to Convex"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bna",
+          "title": "BNA",
+          "icon": "media/bricks.png"
+        }
+      ]
+    },
+    "views": {
+      "bna": [
+        {
+          "type": "webview",
+          "id": "bna.chatView",
+          "name": "AI Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "BNA",
+      "properties": {
+        "bna.convexUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Your BNA Convex deployment URL"
+        },
+        "bna.apiBaseUrl": {
+          "type": "string",
+          "default": "https://ai.ahmedbna.com",
+          "description": "BNA API base URL"
+        },
+        "bna.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: Use your own Anthropic API key"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "bna.openChat",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.config.mjs --production && cd webview-ui && npm run build",
+    "watch": "node esbuild.config.mjs --watch",
+    "dev": "concurrently \"npm run watch\" \"cd webview-ui && npm run dev\"",
+    "lint": "eslint src",
+    "package": "vsce package",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "convex": "^1.27.0",
+    "convex-helpers": "^0.1.79",
+    "@convex-dev/auth": "^0.0.90",
+    "@ai-sdk/anthropic": "^1.2.12",
+    "ai": "^4.3.2",
+    "open": "^10.1.0",
+    "node-fetch": "^3.3.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.17.30",
+    "esbuild": "^0.25.3",
+    "concurrently": "^8.2.0",
+    "typescript": "~5.7.3",
+    "vitest": "^2.1.9",
+    "@vscode/vsce": "^3.0.0"
+  }
+}
