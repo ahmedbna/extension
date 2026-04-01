@@ -12,23 +12,23 @@ This VS Code extension brings the full BNA AI builder experience into your edito
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    VS Code Extension                     │
-│                                                          │
+│                    VS Code Extension                    │
+│                                                         │
 │  ┌────────────┐  ┌────────────┐  ┌────────────────────┐ │
-│  │  Webview    │  │  Terminal   │  │  Real File System  │ │
-│  │ (Chat UI)  │  │  Manager    │  │  (fs module)       │ │
+│  │  Webview   │  │  Terminal  │  │  Real File System  │ │
+│  │ (Chat UI)  │  │  Manager   │  │  (fs module)       │ │
 │  └─────┬──────┘  └──────┬─────┘  └─────────┬──────────┘ │
-│        │                │                   │            │
-│  ┌─────┴─────────── ────┴───────────────────┴─────────┐  │
-│  │                  Extension Host                     │  │
-│  │                                                     │  │
-│  │  AuthManager ──► TokenStore (OS Keychain)           │  │
-│  │  BNAAgent    ──► BNA API (/api/chat)                │  │
-│  │  ToolExecutor ─► FileTools, TerminalManager         │  │
-│  │  CreditsManager ► Status Bar                        │  │
-│  │  ConvexProjectManager ► .env.local                  │  │
-│  └─────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
+│        │                │                  │            │
+│  ┌─────┴───────────-────┴──────────────────┴─────────-┐ │
+│  │                  Extension Host                    │ │
+│  │                                                    │ │
+│  │  AuthManager ──► TokenStore (OS Keychain)          │ │
+│  │  BNAAgent    ──► BNA API (/api/chat)               │ │
+│  │  ToolExecutor ─► FileTools, TerminalManager        │ │
+│  │  CreditsManager ► Status Bar                       │ │
+│  │  ConvexProjectManager ► .env.local                 │ │
+│  └────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### Key differences from the web app
@@ -78,6 +78,16 @@ npm run build
 ```
 
 ### Step 2: Install in VS Code
+
+Build the extension & the webview UI
+
+```bash
+node esbuild.config.mjs
+```
+
+```bash
+cd webview-ui && npx vite build && cd ..
+```
 
 **Option A — Development mode:**
 

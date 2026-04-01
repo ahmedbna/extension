@@ -8,29 +8,29 @@ Transform the BNA web-based AI builder into a VS Code extension that uses the **
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   VS Code Extension                  │
-│                                                      │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ Webview   │  │ Terminal  │  │ File System       │  │
-│  │ (Chat UI) │  │ Provider  │  │ Watcher           │  │
-│  └─────┬─────┘  └─────┬────┘  └────────┬──────────┘  │
-│        │              │                │              │
-│  ┌─────┴──────────────┴────────────────┴──────────┐  │
-│  │              Extension Host (Node.js)           │  │
-│  │                                                  │
-│  │  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │  │ Auth Manager │  │ AI Agent (bna-agent)      │  │
-│  │  │ (Convex Auth)│  │ - Anthropic API           │  │
-│  │  └──────┬───────┘  │ - Tool execution          │  │
-│  │         │          │ - File/Edit/View/Deploy    │  │
-│  │         │          └──────────┬───────────────┘  │
-│  │         │                     │                   │
-│  │  ┌──────┴─────────────────────┴───────────────┐  │
-│  │  │           Convex Client                     │  │
-│  │  │ - Credits, Payments, Chat History           │  │
-│  │  │ - OAuth Connections, Project Management     │  │
-│  │  └────────────────────────────────────────────┘  │
-│  └──────────────────────────────────────────────────┘  │
+│                   VS Code Extension                 │
+│                                                     │
+│  ┌──────────-┐  ┌──────────-┐  ┌────────────────┐   │
+│  │ Webview   │  │ Terminal  │  │ File System    │   │
+│  │ (Chat UI) │  │ Provider  │  │ Watcher        │   │
+│  └─────┬─────┘  └─────┬────-┘  └───────┬────────┘   │
+│        │              │                │            │
+│  ┌─────┴──────────────┴────────────────┴──────────┐ │
+│  │              Extension Host (Node.js)          │ │
+│  │                                                │ │
+│  │  ┌──────────────┐  ┌──────────────────────────┐│ │
+│  │  │ Auth Manager │  │ AI Agent (bna-agent)     ││ │
+│  │  │ (Convex Auth)│  │ - Anthropic API          ││ │
+│  │  └──────┬───────┘  │ - Tool execution         ││ │
+│  │         │          │ - File/Edit/View/Deploy  ││ │
+│  │         │          └──────────┬───────────────┘│ │
+│  │         │                     │                │ │
+│  │  ┌──────┴─────────────────────┴───────────────┐│ │
+│  │  │           Convex Client                    ││ │
+│  │  │ - Credits, Payments, Chat History          ││ │
+│  │  │ - OAuth Connections, Project Management    ││ │
+│  │  └────────────────────────────────────────────┘│ │
+│  └────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────┘
 ```
 
