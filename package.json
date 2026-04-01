@@ -21,6 +21,7 @@
   "activationEvents": [
     "onCommand:bna.openChat",
     "onCommand:bna.signIn",
+    "onUri",
     "workspaceContains:**/convex/schema.ts"
   ],
   "main": "./dist/extension.js",

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AuthManager } from './auth/AuthManager';
 import { TokenStore } from './auth/TokenStore';
+import { BNAUriHandler } from './auth/BNAUriHandler';
 import { ConvexClient } from './auth/ConvexClient';
 import { ConvexOAuth } from './convex/ConvexOAuth';
 import { ConvexProjectManager } from './convex/ConvexProjectManager';
@@ -24,13 +25,18 @@ let terminalManager: TerminalManager;
 let toolExecutor: ToolExecutor;
 let agent: BNAAgent;
 let chatProvider: ChatWebviewProvider;
+let uriHandler: BNAUriHandler;
 
 export function activate(context: vscode.ExtensionContext) {
   logger.info('BNA extension activating...');
 
-  // ── Initialize core services ──────────────────────────────────────────
+  // ── URI handler (must be registered FIRST so VS Code can route deep links) ─
+  uriHandler = new BNAUriHandler();
+  context.subscriptions.push(vscode.window.registerUriHandler(uriHandler));
+
+  // ── Core services ─────────────────────────────────────────────────────────
   tokenStore = new TokenStore(context.secrets);
-  authManager = new AuthManager(tokenStore);
+  authManager = new AuthManager(tokenStore, uriHandler);
 
   const config = vscode.workspace.getConfiguration('bna');
   const convexUrl = config.get<string>('convexUrl') || '';
@@ -42,7 +48,6 @@ export function activate(context: vscode.ExtensionContext) {
   terminalManager = new TerminalManager();
   toolExecutor = new ToolExecutor(terminalManager, projectManager);
 
-  // Agent now takes authManager for auth-gated requests
   agent = new BNAAgent(
     tokenStore,
     authManager,
@@ -51,7 +56,7 @@ export function activate(context: vscode.ExtensionContext) {
     projectManager,
   );
 
-  // ── Chat Webview ──────────────────────────────────────────────────────
+  // ── Chat Webview ──────────────────────────────────────────────────────────
   chatProvider = new ChatWebviewProvider(
     context.extensionUri,
     agent,
@@ -65,17 +70,13 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // ── Register commands ─────────────────────────────────────────────────
+  // ── Commands ──────────────────────────────────────────────────────────────
 
-  // Open chat panel
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.openChat', () => {
       vscode.commands.executeCommand(`${WEBVIEW_VIEW_TYPE}.focus`);
     }),
-  );
 
-  // Sign in
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.signIn', async () => {
       const success = await authManager.signIn();
       if (success) {
@@ -83,25 +84,16 @@ export function activate(context: vscode.ExtensionContext) {
         await tryLoadConvexConnection();
       }
     }),
-  );
 
-  // Sign out
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.signOut', async () => {
       await authManager.signOut();
       agent.reset();
       creditsManager.updateStatusBar();
     }),
-  );
 
-  // Connect Convex
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.connectConvex', async () => {
-      // Ensure authenticated first
       const isAuth = await authManager.ensureAuthenticated();
-      if (!isAuth) {
-        return;
-      }
+      if (!isAuth) return;
 
       const hasConnection = await tokenStore.hasConvexConnection();
       if (!hasConnection) {
@@ -109,7 +101,6 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // Already connected — initialize project for this workspace
       const root = getWorkspaceRoot();
       if (!root) {
         vscode.window.showErrorMessage('Open a workspace folder first.');
@@ -128,9 +119,7 @@ export function activate(context: vscode.ExtensionContext) {
         prompt: 'Project name for your Convex deployment',
         value: 'BNA App',
       });
-      if (!name) {
-        return;
-      }
+      if (!name) return;
 
       await vscode.window.withProgress(
         {
@@ -147,23 +136,15 @@ export function activate(context: vscode.ExtensionContext) {
         },
       );
     }),
-  );
 
-  // New project from template
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.newProject', async () => {
       const isAuth = await authManager.ensureAuthenticated();
-      if (!isAuth) {
-        return;
-      }
+      if (!isAuth) return;
 
       const scaffolder = new TemplateScaffolder(tokenStore, projectManager);
       await scaffolder.scaffold();
     }),
-  );
 
-  // View credits
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.viewCredits', async () => {
       const isAuth = await authManager.isAuthenticated();
       if (!isAuth) {
@@ -185,22 +166,14 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.executeCommand('bna.buyCredits');
       }
     }),
-  );
 
-  // Buy credits
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.buyCredits', () => {
       vscode.env.openExternal(vscode.Uri.parse(`${BNA_API_BASE_URL}/credits`));
     }),
-  );
 
-  // Deploy
-  context.subscriptions.push(
     vscode.commands.registerCommand('bna.deploy', async () => {
       const isAuth = await authManager.ensureAuthenticated();
-      if (!isAuth) {
-        return;
-      }
+      if (!isAuth) return;
 
       const root = getWorkspaceRoot();
       if (!root) {
@@ -238,31 +211,26 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // ── Terminal cleanup ──────────────────────────────────────────────────
+  // ── Terminal cleanup ──────────────────────────────────────────────────────
   context.subscriptions.push(terminalManager.registerTerminalCloseHandler());
 
-  // ── Status bar ────────────────────────────────────────────────────────
+  // ── Status bar ────────────────────────────────────────────────────────────
   creditsManager.updateStatusBar();
 
-  // ── Initialize auth on startup ────────────────────────────────────────
-  initializeOnActivation().catch((err) => {
-    logger.error('Initialization error:', err);
-  });
-
-  // ── File watcher ──────────────────────────────────────────────────────
+  // ── File watcher ──────────────────────────────────────────────────────────
   if (getWorkspaceRoot()) {
     const envWatcher =
       vscode.workspace.createFileSystemWatcher('**/.env.local');
-    envWatcher.onDidChange(() => {
-      projectManager.loadExistingProject().catch(() => {});
-    });
-    envWatcher.onDidCreate(() => {
-      projectManager.loadExistingProject().catch(() => {});
-    });
+    envWatcher.onDidChange(() =>
+      projectManager.loadExistingProject().catch(() => {}),
+    );
+    envWatcher.onDidCreate(() =>
+      projectManager.loadExistingProject().catch(() => {}),
+    );
     context.subscriptions.push(envWatcher);
   }
 
-  // ── Disposables ───────────────────────────────────────────────────────
+  // ── Disposables ───────────────────────────────────────────────────────────
   context.subscriptions.push({
     dispose: () => {
       agent.dispose();
@@ -276,29 +244,30 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   logger.info('BNA extension activated');
+
+  // ── Initialize auth on startup (async, non-blocking) ──────────────────────
+  initializeOnActivation().catch((err) => {
+    logger.error('Initialization error:', err);
+  });
 }
 
 export function deactivate() {
   logger.info('BNA extension deactivated');
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function initializeOnActivation(): Promise<void> {
-  // Initialize auth — validates token, attempts refresh if expired
   const isAuth = await authManager.initialize();
 
   if (!isAuth) {
-    logger.info('User not authenticated — showing sign-in prompt');
+    logger.info('User not authenticated');
     return;
   }
 
   logger.info('User authenticated');
-
-  // Try loading Convex connection
   await tryLoadConvexConnection();
 
-  // Try loading existing project in workspace
   const root = getWorkspaceRoot();
   if (root) {
     const existing = await projectManager.loadExistingProject();
@@ -307,7 +276,6 @@ async function initializeOnActivation(): Promise<void> {
     }
   }
 
-  // Fetch and show credits
   const credits = await creditsManager.fetchCredits();
   if (credits) {
     creditsManager.setCachedCredits(credits.credits);
