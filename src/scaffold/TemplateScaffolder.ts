@@ -5,27 +5,20 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { TokenStore } from '../auth/TokenStore';
 import { ConvexProjectManager } from '../convex/ConvexProjectManager';
-import { ScaffoldAgent } from './ScaffoldAgent';
 import { logger } from '../utils/logger';
+import { copyTemplate } from '../utils/copyTemplate';
 
 const execAsync = promisify(exec);
 
-/**
- * Scaffolds a new BNA project by having the AI generate all source files
- * from scratch — no template repo required.
- */
 export class TemplateScaffolder {
-  private scaffoldAgent: ScaffoldAgent;
-
   constructor(
+    private readonly context: vscode.ExtensionContext,
     private readonly tokenStore: TokenStore,
     private readonly projectManager: ConvexProjectManager,
-  ) {
-    this.scaffoldAgent = new ScaffoldAgent(tokenStore, projectManager);
-  }
+  ) {}
 
   async scaffold(): Promise<void> {
-    // ── Step 1: Project name ────────────────────────────────────────────────
+    // ── Step 1: Project name ─────────────────────────────
     const projectName = await vscode.window.showInputBox({
       prompt: 'What would you like to name your app?',
       value: 'my-bna-app',
@@ -39,117 +32,86 @@ export class TemplateScaffolder {
     });
     if (!projectName) return;
 
-    // ── Step 2: App description (guides AI generation) ─────────────────────
+    // ── Step 2: Description (optional now) ───────────────
     const description = await vscode.window.showInputBox({
-      prompt:
-        'Briefly describe what your app does (helps the AI generate better code)',
-      placeHolder:
-        'e.g. A fitness tracker that lets users log workouts and track progress',
+      prompt: 'Describe your app (optional)',
+      placeHolder: 'Used later by AI features',
       value: '',
     });
-    if (description === undefined) return; // user pressed Escape
+    if (description === undefined) return;
 
-    // ── Step 3: Choose parent directory ────────────────────────────────────
+    // ── Step 3: Choose directory ─────────────────────────
     const uris = await vscode.window.showOpenDialog({
       canSelectFolders: true,
-      canSelectFiles: false,
       canSelectMany: false,
-      title: 'Choose where to create your project',
       openLabel: 'Create Here',
     });
     if (!uris || uris.length === 0) return;
 
     const parentDir = uris[0].fsPath;
+
     const slug = projectName
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
+
     const projectDir = path.join(parentDir, slug);
 
-    // Guard: don't overwrite an existing directory
+    // Prevent overwrite
     try {
       await fs.access(projectDir);
-      vscode.window.showErrorMessage(
-        `Directory already exists: ${projectDir}. Please choose a different name or location.`,
-      );
+      vscode.window.showErrorMessage(`Directory already exists: ${projectDir}`);
       return;
-    } catch {
-      // Good — directory doesn't exist yet
-    }
+    } catch {}
 
-    // ── Step 4: Run scaffolding ─────────────────────────────────────────────
+    // ── Step 4: Scaffold ────────────────────────────────
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: `Creating "${projectName}"`,
-        cancellable: true,
+        cancellable: false,
       },
-      async (progress, cancellationToken) => {
-        cancellationToken.onCancellationRequested(() => {
-          this.scaffoldAgent.abort();
-        });
-
+      async (progress) => {
         try {
-          // 4a. Generate all source files with AI
-          progress.report({ message: 'Generating project files with AI...' });
+          // ✅ STEP 4A — COPY TEMPLATE
+          progress.report({ message: 'Copying base template...' });
 
-          await this.scaffoldAgent.scaffold(
-            projectDir,
-            projectName.trim(),
-            description.trim(),
-            (p) => {
-              progress.report({
-                message: p.message,
-                increment:
-                  p.filesWritten > 0
-                    ? 100 / Math.max(p.totalEstimated, 1)
-                    : undefined,
-              });
-            },
-          );
+          await copyTemplate(this.context, 'expo-convex', projectDir);
 
-          // 4b. Install npm dependencies
+          // ✅ STEP 4B — PERSONALIZE TEMPLATE
+          progress.report({ message: 'Configuring project...' });
+
+          await this.personalizeTemplate(projectDir, projectName, slug);
+
+          // ✅ STEP 4C — INSTALL DEPS
           progress.report({
             message: 'Installing dependencies (this may take a minute)...',
           });
+
           await this.installDeps(projectDir);
 
-          // 4c. Set up Convex project (if connected)
-          const hasConvexToken = await this.tokenStore.hasConvexConnection();
-          if (hasConvexToken) {
-            progress.report({ message: 'Creating Convex project...' });
-            await this.initConvexProject(projectDir, projectName.trim()).catch(
-              (err) => {
-                logger.warn(
-                  'Convex project creation failed (will retry on first deploy):',
-                  err,
-                );
-              },
-            );
+          // ✅ STEP 4D — CONVEX SETUP
+          const hasConvex = await this.tokenStore.hasConvexConnection();
+          if (hasConvex) {
+            progress.report({ message: 'Setting up Convex...' });
+            await this.projectManager.initializeProject(projectName);
           }
 
-          // 4d. Open the project in VS Code
+          // ✅ STEP 4E — OPEN PROJECT
           progress.report({ message: 'Opening project...' });
+
           await vscode.commands.executeCommand(
             'vscode.openFolder',
             vscode.Uri.file(projectDir),
           );
         } catch (err: any) {
-          if (err?.name === 'AbortError') {
-            vscode.window.showWarningMessage('Project creation was cancelled.');
-            // Clean up partial directory
-            await fs
-              .rm(projectDir, { recursive: true, force: true })
-              .catch(() => {});
-            return;
-          }
-
           logger.error('Scaffold failed:', err);
+
           vscode.window.showErrorMessage(
-            `Failed to create project: ${err.message || String(err)}`,
+            `Failed to create project: ${err.message || err}`,
           );
-          // Clean up on failure
+
           await fs
             .rm(projectDir, { recursive: true, force: true })
             .catch(() => {});
@@ -158,34 +120,65 @@ export class TemplateScaffolder {
     );
   }
 
-  // ─── Private helpers ──────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────
 
-  private async installDeps(projectDir: string): Promise<void> {
+  private async personalizeTemplate(
+    projectDir: string,
+    projectName: string,
+    slug: string,
+  ) {
     try {
-      await execAsync('npm install --legacy-peer-deps', {
-        cwd: projectDir,
-        timeout: 180_000, // 3 minutes
-      });
-      logger.info('npm install completed');
-    } catch (err: any) {
-      // Non-fatal — warn and let the user run it manually
-      logger.warn('npm install had issues:', err.message);
-      vscode.window.showWarningMessage(
-        'Dependency installation had issues. Run `npm install` in the project directory.',
-      );
+      // Update package.json
+      const pkgPath = path.join(projectDir, 'package.json');
+      const pkgRaw = await fs.readFile(pkgPath, 'utf-8');
+      const pkg = JSON.parse(pkgRaw);
+
+      pkg.name = slug;
+
+      await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
+
+      // Update app.json (Expo)
+      const appJsonPath = path.join(projectDir, 'app.json');
+
+      try {
+        const appRaw = await fs.readFile(appJsonPath, 'utf-8');
+        const app = JSON.parse(appRaw);
+
+        if (app.expo) {
+          app.expo.name = projectName;
+          app.expo.slug = slug;
+          app.expo.scheme = slug;
+
+          if (app.expo.ios) {
+            app.expo.ios.bundleIdentifier = `com.bna.${slug.replace(/-/g, '')}`;
+          }
+
+          if (app.expo.android) {
+            app.expo.android.package = `com.bna.${slug.replace(/-/g, '')}`;
+          }
+        }
+
+        await fs.writeFile(appJsonPath, JSON.stringify(app, null, 2));
+      } catch {
+        // optional
+      }
+    } catch (err) {
+      logger.warn('Template personalization failed:', err);
     }
   }
 
-  private async initConvexProject(
-    projectDir: string,
-    projectName: string,
-  ): Promise<void> {
-    // Only initialise if we opened this folder as the workspace root
-    // (projectManager needs getWorkspaceRoot() to write .env.local)
-    const info = await this.projectManager.initializeProject(projectName);
-    if (info) {
-      logger.info(
-        `Convex project created: ${info.projectSlug} (${info.deploymentName})`,
+  private async installDeps(projectDir: string) {
+    try {
+      await execAsync('npm install --legacy-peer-deps', {
+        cwd: projectDir,
+        timeout: 180_000,
+      });
+      logger.info('npm install completed');
+    } catch (err: any) {
+      logger.warn('npm install failed:', err.message);
+
+      vscode.window.showWarningMessage(
+        'Dependency installation failed. Run `npm install` manually.',
       );
     }
   }

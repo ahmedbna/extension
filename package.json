@@ -2,6 +2,10 @@
   "name": "bna-ai",
   "displayName": "BNA - AI Mobile App Builder",
   "description": "Build fullstack Expo React Native + Convex apps with AI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahmedbna/extension"
+  },
   "version": "0.1.0",
   "publisher": "bna",
   "engines": {
@@ -21,6 +25,7 @@
   "activationEvents": [
     "onCommand:bna.openChat",
     "onCommand:bna.signIn",
+    "onCommand:bna.newProject",
     "onUri",
     "workspaceContains:**/convex/schema.ts"
   ],

@@ -1,9 +1,12 @@
+// src/webview/ChatWebviewProvider.ts
+
 import * as vscode from 'vscode';
 import { BNAAgent, type StreamEvent } from '../agent/BNAAgent';
 import { AuthManager } from '../auth/AuthManager';
 import { CreditsManager } from '../credits/CreditsManager';
 import { WEBVIEW_VIEW_TYPE } from '../constants';
 import { logger } from '../utils/logger';
+import { ensureTemplateCopied } from '@/utils/template';
 
 /**
  * Provides the chat webview in the VS Code sidebar.
@@ -97,7 +100,6 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case 'sendMessage': {
-        // Double-check auth before sending
         const isAuth = await this.authManager.isAuthenticated();
         if (!isAuth) {
           this.postMessage({ type: 'authState', isAuthenticated: false });
@@ -107,9 +109,21 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
           });
           return;
         }
-        if (!message.text) {
+
+        if (!message.text) return;
+
+        // ✅ STEP 1: Ensure template exists BEFORE AI runs
+        try {
+          await ensureTemplateCopied(this.extensionUri);
+        } catch (err: any) {
+          this.postMessage({
+            type: 'error',
+            error: err.message || 'Failed to initialize project',
+          });
           return;
         }
+
+        // ✅ STEP 2: Now safe to run AI
         await this.agent.sendMessage(message.text);
         break;
       }

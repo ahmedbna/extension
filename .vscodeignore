@@ -14,3 +14,6 @@ tsconfig.json
 **/*.map
 .gitignore
 ARCHITECTURE.md
+
+# ensure template is included
+!templates/**

@@ -1,3 +1,5 @@
+// src/extension.ts
+
 import * as vscode from 'vscode';
 import { AuthManager } from './auth/AuthManager';
 import { TokenStore } from './auth/TokenStore';
@@ -152,7 +154,11 @@ export function activate(context: vscode.ExtensionContext) {
       const isAuth = await authManager.ensureAuthenticated();
       if (!isAuth) return;
 
-      const scaffolder = new TemplateScaffolder(tokenStore, projectManager);
+      const scaffolder = new TemplateScaffolder(
+        context,
+        tokenStore,
+        projectManager,
+      );
       await scaffolder.scaffold();
     }),
 

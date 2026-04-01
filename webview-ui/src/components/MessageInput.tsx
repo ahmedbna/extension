@@ -1,3 +1,5 @@
+// src/components/MessageInput.tsx
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 interface Props {
@@ -46,7 +48,9 @@ export function MessageInput({ onSend, onStop, isStreaming, disabled }: Props) {
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder={isStreaming ? 'Building...' : 'Describe what you want to build...'}
+        placeholder={
+          isStreaming ? 'Building...' : 'Describe what you want to build...'
+        }
         disabled={disabled}
         rows={1}
       />
@@ -54,7 +58,9 @@ export function MessageInput({ onSend, onStop, isStreaming, disabled }: Props) {
         style={{
           ...styles.sendBtn,
           ...(isStreaming ? styles.stopBtn : {}),
-          ...((disabled || (!isStreaming && !value.trim())) ? styles.disabledBtn : {}),
+          ...(disabled || (!isStreaming && !value.trim())
+            ? styles.disabledBtn
+            : {}),
         }}
         onClick={isStreaming ? onStop : handleSend}
         disabled={disabled || (!isStreaming && !value.trim())}
