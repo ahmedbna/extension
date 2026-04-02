@@ -5,26 +5,68 @@ import { getWorkspaceRoot } from '../utils/workspace';
 import { logger } from '../utils/logger';
 import { EXCLUDED_FILE_PATHS } from '../constants';
 
+/**
+ * Normalize a file path from the AI agent.
+ * The agent may send paths like:
+ *   - /home/project/app/index.tsx  (from the system prompt's WORK_DIR)
+ *   - app/index.tsx                (relative)
+ *   - /app/index.tsx               (absolute-looking but relative to project)
+ *   - .                            (project root)
+ */
+function normalizePath(filePath: string): string {
+  let p = filePath;
+
+  // Strip /home/project/ prefix (the agent's virtual working directory)
+  if (p.startsWith('/home/project/')) {
+    p = p.slice('/home/project/'.length);
+  } else if (p === '/home/project') {
+    p = '.';
+  }
+
+  // Strip leading slash (agent sometimes sends /app/index.tsx meaning relative)
+  if (p.startsWith('/') && !path.isAbsolute(p)) {
+    p = p.slice(1);
+  }
+
+  // Handle empty path
+  if (!p || p === '') {
+    p = '.';
+  }
+
+  return p;
+}
+
+/**
+ * Resolve a normalized path to an absolute path in the workspace.
+ */
+function resolveToWorkspace(filePath: string): string {
+  const root = getWorkspaceRoot();
+  if (!root) throw new Error('No workspace open');
+
+  const normalized = normalizePath(filePath);
+
+  // If it's already an absolute path within the workspace, use it directly
+  if (path.isAbsolute(normalized) && normalized.startsWith(root)) {
+    return normalized;
+  }
+
+  return path.join(root, normalized);
+}
+
 // ─── File Tool ────────────────────────────────────────────────────────────────
 // Writes a complete file to the real file system
 
 export async function executeFileTool(
   filePath: string,
-  content: string
+  content: string,
 ): Promise<void> {
   const root = getWorkspaceRoot();
   if (!root) throw new Error('No workspace open');
 
-  // Normalize the path: remove /home/project prefix if present
-  let relativePath = filePath;
-  if (relativePath.startsWith('/home/project/')) {
-    relativePath = relativePath.slice('/home/project/'.length);
-  } else if (relativePath.startsWith('/home/project')) {
-    relativePath = relativePath.slice('/home/project'.length);
-  }
+  const relativePath = normalizePath(filePath);
 
   // Check excluded paths
-  if (EXCLUDED_FILE_PATHS.some(ex => relativePath.includes(ex))) {
+  if (EXCLUDED_FILE_PATHS.some((ex) => relativePath.includes(ex))) {
     throw new Error(`Cannot modify excluded file: ${relativePath}`);
   }
 
@@ -38,10 +80,13 @@ export async function executeFileTool(
   await fs.writeFile(fullPath, content, 'utf-8');
   logger.debug(`File written: ${relativePath}`);
 
-  // Open the file in VS Code editor
+  // Open the file in VS Code editor (don't steal focus)
   try {
     const doc = await vscode.workspace.openTextDocument(fullPath);
-    await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+    await vscode.window.showTextDocument(doc, {
+      preview: false,
+      preserveFocus: true,
+    });
   } catch {
     // File might not be a text file
   }
@@ -52,19 +97,9 @@ export async function executeFileTool(
 
 export async function executeViewTool(
   filePath: string,
-  viewRange?: [number, number] | null
+  viewRange?: [number, number] | null,
 ): Promise<string> {
-  const root = getWorkspaceRoot();
-  if (!root) throw new Error('No workspace open');
-
-  let relativePath = filePath;
-  if (relativePath.startsWith('/home/project/')) {
-    relativePath = relativePath.slice('/home/project/'.length);
-  } else if (relativePath.startsWith('/home/project')) {
-    relativePath = relativePath.slice('/home/project'.length);
-  }
-
-  const fullPath = path.join(root, relativePath || '.');
+  const fullPath = resolveToWorkspace(filePath);
 
   try {
     const stat = await fs.stat(fullPath);
@@ -78,8 +113,8 @@ export async function executeViewTool(
         return a.name.localeCompare(b.name);
       });
 
-      return `Directory:\n${sorted
-        .map(e => `- ${e.name} (${e.isDirectory() ? 'dir' : 'file'})`)
+      return `Directory: ${normalizePath(filePath)}\n${sorted
+        .map((e) => `- ${e.name} (${e.isDirectory() ? 'dir' : 'file'})`)
         .join('\n')}`;
     }
 
@@ -89,7 +124,8 @@ export async function executeViewTool(
 
     if (viewRange && viewRange.length === 2) {
       const [start, end] = viewRange;
-      if (start < 1) throw new Error('Invalid range: start must be greater than 0');
+      if (start < 1)
+        throw new Error('Invalid range: start must be greater than 0');
       if (end === -1) {
         lines = lines.slice(start - 1);
       } else {
@@ -100,7 +136,9 @@ export async function executeViewTool(
     return lines.join('\n');
   } catch (err: any) {
     if (err.code === 'ENOENT') {
-      throw new Error(`File not found: ${relativePath}`);
+      throw new Error(
+        `File not found: ${normalizePath(filePath)} (looked in ${fullPath})`,
+      );
     }
     throw err;
   }
@@ -112,19 +150,14 @@ export async function executeViewTool(
 export async function executeEditTool(
   filePath: string,
   oldText: string,
-  newText: string
+  newText: string,
 ): Promise<string> {
   const root = getWorkspaceRoot();
   if (!root) throw new Error('No workspace open');
 
-  let relativePath = filePath;
-  if (relativePath.startsWith('/home/project/')) {
-    relativePath = relativePath.slice('/home/project/'.length);
-  } else if (relativePath.startsWith('/home/project')) {
-    relativePath = relativePath.slice('/home/project'.length);
-  }
+  const relativePath = normalizePath(filePath);
 
-  if (EXCLUDED_FILE_PATHS.some(ex => relativePath.includes(ex))) {
+  if (EXCLUDED_FILE_PATHS.some((ex) => relativePath.includes(ex))) {
     throw new Error(`Cannot modify excluded file: ${relativePath}`);
   }
 
@@ -136,16 +169,33 @@ export async function executeEditTool(
   }
 
   const fullPath = path.join(root, relativePath);
-  let content = await fs.readFile(fullPath, 'utf-8');
+  let content: string;
+
+  try {
+    content = await fs.readFile(fullPath, 'utf-8');
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      throw new Error(
+        `File not found: ${relativePath}. Use the view tool to check the file exists first.`,
+      );
+    }
+    throw err;
+  }
 
   const matchPos = content.indexOf(oldText);
   if (matchPos === -1) {
-    throw new Error(`Old text not found in ${relativePath}`);
+    // Provide helpful error with file content snippet
+    const preview = content.slice(0, 200);
+    throw new Error(
+      `Old text not found in ${relativePath}. File starts with:\n${preview}...`,
+    );
   }
 
   const secondMatch = content.indexOf(oldText, matchPos + oldText.length);
   if (secondMatch !== -1) {
-    throw new Error(`Old text found multiple times in ${relativePath}`);
+    throw new Error(
+      `Old text found multiple times in ${relativePath}. Make the match more specific.`,
+    );
   }
 
   content = content.replace(oldText, newText);
@@ -154,12 +204,14 @@ export async function executeEditTool(
   // Refresh the editor if the file is open
   const uri = vscode.Uri.file(fullPath);
   const openEditor = vscode.window.visibleTextEditors.find(
-    e => e.document.uri.fsPath === fullPath
+    (e) => e.document.uri.fsPath === fullPath,
   );
   if (openEditor) {
-    // The file watcher will pick up the change, but force a reload
     const doc = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+    await vscode.window.showTextDocument(doc, {
+      preview: false,
+      preserveFocus: true,
+    });
   }
 
   logger.debug(`File edited: ${relativePath}`);

@@ -9,7 +9,7 @@ import { ConvexOAuth } from './convex/ConvexOAuth';
 import { ConvexProjectManager } from './convex/ConvexProjectManager';
 import { CreditsManager } from './credits/CreditsManager';
 import { TerminalManager } from './terminal/TerminalManager';
-import { ToolExecutor } from './tools/ToolExecutor';
+import { ToolExecutor } from './agent/ToolExecutor';
 import { BNAAgent } from './agent/BNAAgent';
 import { ChatWebviewProvider } from './webview/ChatWebviewProvider';
 import { BNA_API_BASE_URL, WEBVIEW_VIEW_TYPE } from './constants';
@@ -49,6 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
   projectManager = new ConvexProjectManager(tokenStore, convexOAuth);
   creditsManager = new CreditsManager(tokenStore);
   terminalManager = new TerminalManager();
+  // ToolExecutor is now in src/agent/ToolExecutor.ts (not src/tools/)
   toolExecutor = new ToolExecutor(terminalManager, projectManager);
 
   agent = new BNAAgent(
@@ -100,16 +101,12 @@ export function activate(context: vscode.ExtensionContext) {
 
       const hasConnection = await tokenStore.hasConvexConnection();
       if (!hasConnection) {
-        // No stored connection — open browser OAuth flow
         await convexOAuth.connectTeam();
         return;
       }
 
-      // Has a stored OAuth token but may need to create/link a project.
-      // Only NOW do we need a workspace (to write .env.local).
       const root = getWorkspaceRoot();
       if (!root) {
-        // No workspace open — offer to reconnect Convex account or bail
         const choice = await vscode.window.showInformationMessage(
           'Convex account already connected. Open a project folder to create a Convex deployment.',
           'Reconnect Convex Account',
@@ -189,9 +186,6 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand('bna.deploy', async () => {
-      const isAuth = await authManager.ensureAuthenticated();
-      if (!isAuth) return;
-
       const root = getWorkspaceRoot();
       if (!root) {
         vscode.window.showErrorMessage('Open a workspace folder first.');

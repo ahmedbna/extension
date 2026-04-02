@@ -131,16 +131,7 @@ export class BNAAgent {
     this.abortController = new AbortController();
 
     try {
-      // Check if user has their own API key (direct mode)
-      const config = vscode.workspace.getConfiguration('bna');
-      const apiKey = config.get<string>('anthropicApiKey');
-
-      if (apiKey) {
-        await this.callAnthropicDirect(apiKey, this.abortController.signal);
-      } else {
-        // Proxy mode — call BNA server which handles Anthropic + credits
-        await this.callBNAProxy(this.abortController.signal);
-      }
+      await this.callBNAProxy(this.abortController.signal);
     } catch (err: any) {
       if (err.name === 'AbortError') {
         this._onStreamEvent.fire({
@@ -165,105 +156,6 @@ export class BNAAgent {
         error: err.message || String(err),
       });
     }
-  }
-
-  /**
-   * Direct Anthropic API call — used when the user provides their own API key.
-   * The full agentic loop runs locally: Anthropic → tool call → execute → feed back.
-   */
-  private async callAnthropicDirect(
-    apiKey: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const systemPrompt = SystemPromptBuilder.build();
-    const tools = SystemPromptBuilder.getToolDefinitions();
-
-    // Build the messages array for Anthropic
-    const anthropicMessages = this.buildAnthropicMessages();
-
-    let continueLoop = true;
-    let maxIterations = 20; // Safety limit
-
-    while (continueLoop && maxIterations > 0) {
-      maxIterations--;
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 16384,
-          system: systemPrompt,
-          tools,
-          messages: anthropicMessages,
-          stream: true,
-        }),
-        signal,
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Anthropic API error (${response.status}): ${text}`);
-      }
-
-      if (!response.body) {
-        throw new Error('No response body from Anthropic');
-      }
-
-      const result = await this.processAnthropicStream(response.body, signal);
-
-      // If the model wants to use tools, execute them and continue the loop
-      if (result.stopReason === 'tool_use' && result.toolUses.length > 0) {
-        // Add the assistant message with tool_use blocks
-        anthropicMessages.push({
-          role: 'assistant',
-          content: result.contentBlocks,
-        });
-
-        // Execute each tool and build the tool_result message
-        const toolResults: any[] = [];
-        for (const toolUse of result.toolUses) {
-          const execResult = await this.toolExecutor.execute({
-            toolCallId: toolUse.id,
-            toolName: toolUse.name,
-            args: toolUse.input,
-          });
-
-          this._onStreamEvent.fire({
-            type: 'tool-result',
-            toolResult: execResult,
-          });
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: execResult.result,
-            is_error: execResult.isError,
-          });
-        }
-
-        anthropicMessages.push({
-          role: 'user',
-          content: toolResults,
-        });
-      } else {
-        // Model finished (stop or end_turn)
-        continueLoop = false;
-      }
-    }
-
-    // Store the final assistant message
-    const assistantContent = this.artifactParser.flush();
-    this._onStreamEvent.fire({ type: 'finish' });
-
-    // Report usage for credit tracking (fire-and-forget)
-    this.reportUsageToServer().catch((err) => {
-      logger.debug('Failed to report usage:', err);
-    });
   }
 
   /**

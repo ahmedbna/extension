@@ -101,11 +101,6 @@
           "type": "string",
           "default": "https://ai.ahmedbna.com",
           "description": "BNA API base URL"
-        },
-        "bna.anthropicApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Optional: Use your own Anthropic API key"
         }
       }
     },

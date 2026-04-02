@@ -325,11 +325,10 @@ The status bar shows: `⚡ 87 credits`
 
 VS Code Settings (`Ctrl+,`):
 
-| Setting               | Default                   | Description                |
-| --------------------- | ------------------------- | -------------------------- |
-| `bna.apiBaseUrl`      | `https://ai.ahmedbna.com` | BNA API URL                |
-| `bna.convexUrl`       | (empty)                   | Your Convex deployment URL |
-| `bna.anthropicApiKey` | (empty)                   | Optional: your own API key |
+| Setting          | Default                   | Description                |
+| ---------------- | ------------------------- | -------------------------- |
+| `bna.apiBaseUrl` | `https://ai.ahmedbna.com` | BNA API URL                |
+| `bna.convexUrl`  | (empty)                   | Your Convex deployment URL |
 
 ---
 

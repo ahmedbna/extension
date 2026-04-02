@@ -31,16 +31,19 @@ export class ToolExecutor {
   ) {}
 
   async execute(call: ToolCall): Promise<ToolResult> {
-    const callKey = `${call.toolName}:${JSON.stringify(call.args)}`;
-    if (this.previousToolCalls.has(callKey)) {
-      return {
-        toolCallId: call.toolCallId,
-        result:
-          'Error: This exact action was already executed. Please try a different approach.',
-        isError: true,
-      };
+    // Don't deduplicate view calls - the agent may need to re-read files
+    if (call.toolName !== 'view') {
+      const callKey = `${call.toolName}:${JSON.stringify(call.args)}`;
+      if (this.previousToolCalls.has(callKey)) {
+        return {
+          toolCallId: call.toolCallId,
+          result:
+            'Error: This exact action was already executed. Please try a different approach.',
+          isError: true,
+        };
+      }
+      this.previousToolCalls.set(callKey, true);
     }
-    this.previousToolCalls.set(callKey, true);
 
     try {
       const result = await this.dispatchTool(call);
@@ -108,7 +111,7 @@ export class ToolExecutor {
     // Prompt user to start Expo dev server
     vscode.window
       .showInformationMessage(
-        'Convex functions deployed successfully!',
+        'Convex deployed! Start the dev server?',
         'Start iOS',
         'Start Android',
       )
@@ -136,7 +139,7 @@ export class ToolExecutor {
     if (args.requiresNativeRebuild) {
       vscode.window
         .showWarningMessage(
-          'This package requires a native rebuild. Run `npx expo run:ios` or `npx expo run:android`.',
+          'Native rebuild required. Run `npx expo run:ios` or `npx expo run:android`.',
           'Rebuild iOS',
           'Rebuild Android',
         )
@@ -154,7 +157,6 @@ export class ToolExecutor {
 
   /**
    * Returns REAL documentation content from bna-agent docs.
-   * Previously this was a stub — now it returns the actual content.
    */
   private async handleLookupDocs(args: { docs: string[] }): Promise<string> {
     const results: string[] = [];
@@ -173,7 +175,6 @@ export class ToolExecutor {
 
   /**
    * Returns REAL Convex documentation content.
-   * Previously this was a stub — now it returns the actual content.
    */
   private async handleLookupConvexDocs(args: {
     topics: string[];
