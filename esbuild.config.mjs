@@ -1,4 +1,5 @@
 import * as esbuild from 'esbuild';
+import * as path from 'path';
 
 const isProduction = process.argv.includes('--production');
 const isWatch = process.argv.includes('--watch');
@@ -15,6 +16,10 @@ const buildOptions = {
   sourcemap: !isProduction,
   minify: isProduction,
   treeShaking: true,
+  // Resolve @/* imports to ./src/*
+  alias: {
+    '@': path.resolve('src'),
+  },
   define: {
     'process.env.NODE_ENV': isProduction ? '"production"' : '"development"',
   },

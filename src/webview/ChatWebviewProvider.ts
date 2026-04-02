@@ -6,7 +6,7 @@ import { AuthManager } from '../auth/AuthManager';
 import { CreditsManager } from '../credits/CreditsManager';
 import { WEBVIEW_VIEW_TYPE } from '../constants';
 import { logger } from '../utils/logger';
-import { ensureTemplateCopied } from '@/utils/template';
+import { ensureTemplateCopied } from '../utils/template';
 
 /**
  * Provides the chat webview in the VS Code sidebar.

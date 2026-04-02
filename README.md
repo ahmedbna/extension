@@ -23,7 +23,7 @@ This VS Code extension brings the full BNA AI builder experience into your edito
 │  │                  Extension Host                    │ │
 │  │                                                    │ │
 │  │  AuthManager ──► TokenStore (OS Keychain)          │ │
-│  │  BNAAgent    ──► BNA API (/api/chat)               │ │
+│  │  BNAAgent    ──► BNA API (/api/extension-chat)     │ │
 │  │  ToolExecutor ─► FileTools, TerminalManager        │ │
 │  │  CreditsManager ► Status Bar                       │ │
 │  │  ConvexProjectManager ► .env.local                 │ │
@@ -33,16 +33,16 @@ This VS Code extension brings the full BNA AI builder experience into your edito
 
 ### Key differences from the web app
 
-| Concern     | Web App                          | VS Code Extension                             |
-| ----------- | -------------------------------- | --------------------------------------------- |
-| File system | WebContainer (virtual)           | Real local `fs`                               |
-| Terminal    | xterm.js + WebContainer          | VS Code integrated terminal + `child_process` |
-| Editor      | Embedded Monaco                  | Native VS Code editor                         |
-| Auth tokens | Browser `localStorage`           | VS Code `SecretStorage` (OS keychain)         |
-| npm install | WebContainer npm                 | Real `npx expo install`                       |
-| Deploy      | WebContainer `convex dev --once` | Real `convex` CLI                             |
-| Preview     | WebContainer iframe              | Real Expo dev server                          |
-| AI backend  | Remix action `/api/chat`         | Same endpoint, called from Node.js            |
+| Concern     | Web App                            | VS Code Extension                             |
+| ----------- | ---------------------------------- | --------------------------------------------- |
+| File system | WebContainer (virtual)             | Real local `fs`                               |
+| Terminal    | xterm.js + WebContainer            | VS Code integrated terminal + `child_process` |
+| Editor      | Embedded Monaco                    | Native VS Code editor                         |
+| Auth tokens | Browser `localStorage`             | VS Code `SecretStorage` (OS keychain)         |
+| npm install | WebContainer npm                   | Real `npx expo install`                       |
+| Deploy      | WebContainer `convex dev --once`   | Real `convex` CLI                             |
+| Preview     | WebContainer iframe                | Real Expo dev server                          |
+| AI backend  | Remix action `/api/extension-chat` | Same endpoint, called from Node.js            |
 
 ---
 
@@ -182,7 +182,7 @@ bna-vscode-extension/
 │   │   └── TokenStore.ts       # SecretStorage (OS keychain)
 │   │
 │   ├── agent/
-│   │   ├── BNAAgent.ts         # AI orchestrator (calls /api/chat)
+│   │   ├── BNAAgent.ts         # AI orchestrator (calls /api/extension-chat)
 │   │   └── MessageHistory.ts   # Local + remote history sync
 │   │
 │   ├── tools/
@@ -234,7 +234,7 @@ bna-vscode-extension/
 
 ## How the AI Agent Works
 
-The extension calls the **same BNA API** (`/api/chat`) as the web app. This ensures:
+The extension calls the **same BNA API** (`/api/extension-chat`) as the web app. This ensures:
 
 - ✅ Same system prompts (Expo + Convex guidelines)
 - ✅ Same tool definitions (deploy, view, edit, npmInstall, etc.)
@@ -249,7 +249,7 @@ User types message
     ▼
 BNAAgent.sendMessage()
     │
-    ├── POST /api/chat (BNA server)
+    ├── POST /api/extension-chat (BNA server)
     │     │
     │     ├── System prompts + tools injected server-side
     │     ├── Anthropic API called
@@ -309,7 +309,7 @@ Extension                        Browser                         BNA Server
 Credits work identically to the web app:
 
 1. **Check credits** — stored in Convex `credits` table, shown in status bar
-2. **Deduction** — the `/api/chat` endpoint deducts credits server-side after each generation
+2. **Deduction** — the `/api/extension-chat` endpoint deducts credits server-side after each generation
 3. **Purchase** — "Buy Credits" command opens `ai.ahmedbna.com/credits` in browser
 4. **Webhook** — Dodo Payments webhook on the server handles credit provisioning
 
@@ -366,7 +366,7 @@ npm test
 - Credit calculation logic (`app/lib/common/usage.ts`)
 - Convex schema and backend functions (`convex/`)
 - Auth flow using `vscodeAuthSessions`
-- API endpoint (`/api/chat`) — same SSE stream protocol
+- API endpoint (`/api/extension-chat`) — same SSE stream protocol
 
 ### What was replaced:
 
