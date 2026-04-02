@@ -2,8 +2,9 @@ node_modules/
 dist/
 *.vsix
 .vscode-test/
-webview-ui/dist/
-webview-ui/node_modules/
+web/dist/
+web/node_modules/
+bna-agent/node_modules/
 *.js.map
 .env
 .env.local

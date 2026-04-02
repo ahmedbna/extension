@@ -71,7 +71,7 @@ cd bna-vscode-extension
 npm install
 
 # Install webview UI dependencies
-cd webview-ui && npm install && cd ..
+cd web && npm install && cd ..
 
 # Build everything
 npm run build
@@ -86,7 +86,7 @@ node esbuild.config.mjs
 ```
 
 ```bash
-cd webview-ui && npx vite build && cd ..
+cd web && npx vite build && cd ..
 ```
 
 **Option A — Development mode:**
@@ -210,7 +210,7 @@ bna-vscode-extension/
 │       ├── workspace.ts
 │       └── FileWatcher.ts
 │
-├── webview-ui/                 # React chat UI (separate Vite build)
+├── web/                 # React chat UI (separate Vite build)
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── src/

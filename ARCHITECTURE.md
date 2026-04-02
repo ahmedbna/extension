@@ -111,7 +111,7 @@ bna-vscode-extension/
 │   ├── bricks.png
 │   └── bna.png
 │
-└── webview-ui/              # React webview (separate build)
+└── web/              # React webview (separate build)
     ├── package.json
     ├── tsconfig.json
     ├── vite.config.ts

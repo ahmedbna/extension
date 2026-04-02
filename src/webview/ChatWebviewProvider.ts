@@ -38,7 +38,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this.extensionUri, 'media'),
-        vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist'),
+        vscode.Uri.joinPath(this.extensionUri, 'web', 'dist'),
       ],
     };
 
@@ -224,10 +224,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
    */
   private getHtmlContent(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'index.js'),
+      vscode.Uri.joinPath(this.extensionUri, 'web', 'dist', 'index.js'),
     );
     const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'index.css'),
+      vscode.Uri.joinPath(this.extensionUri, 'web', 'dist', 'index.css'),
     );
     const logoUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'bricks.png'),

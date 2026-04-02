@@ -119,9 +119,9 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "build": "node esbuild.config.mjs --production && cd webview-ui && npm run build",
+    "build": "node esbuild.config.mjs --production && cd web && npm run build",
     "watch": "node esbuild.config.mjs --watch",
-    "dev": "concurrently \"npm run watch\" \"cd webview-ui && npm run dev\"",
+    "dev": "concurrently \"npm run watch\" \"cd web && npm run dev\"",
     "lint": "eslint src",
     "package": "vsce package",
     "test": "vitest run"
