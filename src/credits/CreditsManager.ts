@@ -1,3 +1,9 @@
+// src/credits/CreditsManager.ts
+//
+// Manages credit checking, deduction, and status bar display.
+// Credits are stored in Convex and deducted via the BNA server API
+// after each AI generation completes.
+
 import * as vscode from 'vscode';
 import { TokenStore } from '../auth/TokenStore';
 import {
@@ -13,10 +19,6 @@ export interface CreditsInfo {
   initialized: boolean;
 }
 
-/**
- * Manages credit checking and deduction.
- * Credits are stored server-side in Convex and deducted via the BNA API.
- */
 export class CreditsManager {
   private _onCreditsChanged = new vscode.EventEmitter<number>();
   readonly onCreditsChanged = this._onCreditsChanged.event;
@@ -33,41 +35,29 @@ export class CreditsManager {
     this.statusBarItem.tooltip = 'BNA Credits';
   }
 
-  /**
-   * Check if user has a Convex connection.
-   */
   async hasConnection(): Promise<boolean> {
     return this.tokenStore.hasConvexConnection();
   }
 
-  /**
-   * Fetch current credits from the BNA server.
-   */
+  // ─── Fetch credits ────────────────────────────────────────────────────
+
   async fetchCredits(): Promise<CreditsInfo | null> {
     try {
       const token = await this.tokenStore.getConvexAuthToken();
-      if (!token) {
-        return null;
+      if (!token) return null;
+
+      const response = await fetch(`${BNA_API_BASE_URL}/api/credits`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as CreditsInfo;
+        this.cachedCredits = data.credits;
+        this.updateStatusBar();
+        return data;
       }
 
-      // Try fetching from API
-      try {
-        const response = await fetch(`${BNA_API_BASE_URL}/api/credits`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (response.ok) {
-          const data = (await response.json()) as CreditsInfo;
-          this.cachedCredits = data.credits;
-          this.updateStatusBar();
-          return data;
-        }
-      } catch {
-        // API might not have this endpoint — fall back to cached
-      }
-
+      // Fallback
       return {
         credits: this.cachedCredits ?? 100,
         totalCreditsUsed: 0,
@@ -79,15 +69,12 @@ export class CreditsManager {
     }
   }
 
-  calculateCreditsToDeduct(
-    promptTokens: number,
-    completionTokens: number,
-  ): number {
-    const inputCredits = promptTokens / INPUT_TOKENS_PER_CREDIT;
-    const outputCredits = completionTokens / OUTPUT_TOKENS_PER_CREDIT;
-    return Math.ceil(inputCredits + outputCredits);
-  }
+  // ─── Report usage & deduct ────────────────────────────────────────────
 
+  /**
+   * Report token usage to the BNA server for credit deduction.
+   * Calls the deductCreditsForTokensPublic Convex mutation via the API.
+   */
   async reportUsage(args: {
     userId: string;
     chatId: string;
@@ -96,6 +83,63 @@ export class CreditsManager {
     basePromptTokens: number;
     cacheCreationTokens: number;
     cacheReadTokens: number;
+  }): Promise<{ creditsDeducted: number; remainingCredits: number } | null> {
+    try {
+      const token = await this.tokenStore.getConvexAuthToken();
+      if (!token) return null;
+
+      const response = await fetch(
+        `${BNA_API_BASE_URL}/api/extension-deduct-credits`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            userId: args.userId,
+            chatId: args.chatId,
+            promptTokens: args.promptTokens,
+            completionTokens: args.completionTokens,
+            basePromptTokens: args.basePromptTokens,
+            cacheCreationTokens: args.cacheCreationTokens,
+            cacheReadTokens: args.cacheReadTokens,
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        logger.error('Credit deduction API error:', text);
+
+        // Try the legacy endpoint as fallback
+        return this.reportUsageLegacy(args);
+      }
+
+      const result = (await response.json()) as {
+        creditsDeducted: number;
+        remainingCredits: number;
+      };
+
+      this.cachedCredits = result.remainingCredits;
+      this.updateStatusBar();
+      this._onCreditsChanged.fire(result.remainingCredits);
+
+      return result;
+    } catch (err) {
+      logger.error('Error reporting usage:', String(err));
+      return this.reportUsageLegacy(args);
+    }
+  }
+
+  /**
+   * Legacy fallback — calls the simpler deduct-credits endpoint.
+   */
+  private async reportUsageLegacy(args: {
+    userId: string;
+    chatId: string;
+    promptTokens: number;
+    completionTokens: number;
   }): Promise<{ creditsDeducted: number; remainingCredits: number } | null> {
     try {
       const token = await this.tokenStore.getConvexAuthToken();
@@ -114,7 +158,7 @@ export class CreditsManager {
       });
 
       if (!response.ok) {
-        logger.error('Failed to deduct credits:', await response.text());
+        logger.error('Legacy credit deduction failed:', await response.text());
         return null;
       }
 
@@ -122,15 +166,18 @@ export class CreditsManager {
         creditsDeducted: number;
         remainingCredits: number;
       };
+
       this.cachedCredits = result.remainingCredits;
       this.updateStatusBar();
       this._onCreditsChanged.fire(result.remainingCredits);
       return result;
     } catch (err) {
-      logger.error('Error reporting usage:', String(err));
+      logger.error('Legacy credit report failed:', String(err));
       return null;
     }
   }
+
+  // ─── Status bar ───────────────────────────────────────────────────────
 
   updateStatusBar(credits?: number) {
     const c = credits ?? this.cachedCredits;
@@ -156,6 +203,15 @@ export class CreditsManager {
   setCachedCredits(credits: number) {
     this.cachedCredits = credits;
     this.updateStatusBar();
+  }
+
+  calculateCreditsToDeduct(
+    promptTokens: number,
+    completionTokens: number,
+  ): number {
+    const inputCredits = promptTokens / INPUT_TOKENS_PER_CREDIT;
+    const outputCredits = completionTokens / OUTPUT_TOKENS_PER_CREDIT;
+    return Math.ceil(inputCredits + outputCredits);
   }
 
   dispose() {

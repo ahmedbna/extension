@@ -32,11 +32,11 @@ let uriHandler: BNAUriHandler;
 export function activate(context: vscode.ExtensionContext) {
   logger.info('BNA extension activating...');
 
-  // ── URI handler (must be registered FIRST so VS Code can route deep links) ─
+  // ── URI handler (must be registered FIRST) ────────────────────────────
   uriHandler = new BNAUriHandler();
   context.subscriptions.push(vscode.window.registerUriHandler(uriHandler));
 
-  // ── Core services ─────────────────────────────────────────────────────────
+  // ── Core services ─────────────────────────────────────────────────────
   tokenStore = new TokenStore(context.secrets);
   authManager = new AuthManager(tokenStore, uriHandler);
 
@@ -44,12 +44,10 @@ export function activate(context: vscode.ExtensionContext) {
   const convexUrl = config.get<string>('convexUrl') || '';
   convexClient = new ConvexClient(convexUrl, tokenStore);
 
-  // Pass uriHandler so connectTeam() can receive the deep-link callback
   convexOAuth = new ConvexOAuth(tokenStore, uriHandler);
   projectManager = new ConvexProjectManager(tokenStore, convexOAuth);
   creditsManager = new CreditsManager(tokenStore);
   terminalManager = new TerminalManager();
-  // ToolExecutor is now in src/agent/ToolExecutor.ts (not src/tools/)
   toolExecutor = new ToolExecutor(terminalManager, projectManager);
 
   agent = new BNAAgent(
@@ -60,7 +58,7 @@ export function activate(context: vscode.ExtensionContext) {
     projectManager,
   );
 
-  // ── Chat Webview ──────────────────────────────────────────────────────────
+  // ── Chat Webview ──────────────────────────────────────────────────────
   chatProvider = new ChatWebviewProvider(
     context.extensionUri,
     agent,
@@ -74,7 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // ── Commands ──────────────────────────────────────────────────────────────
+  // ── Commands ──────────────────────────────────────────────────────────
 
   context.subscriptions.push(
     vscode.commands.registerCommand('bna.openChat', () => {
@@ -222,13 +220,13 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // ── Terminal cleanup ──────────────────────────────────────────────────────
+  // ── Terminal cleanup ──────────────────────────────────────────────────
   context.subscriptions.push(terminalManager.registerTerminalCloseHandler());
 
-  // ── Status bar ────────────────────────────────────────────────────────────
+  // ── Status bar ────────────────────────────────────────────────────────
   creditsManager.updateStatusBar();
 
-  // ── File watcher ──────────────────────────────────────────────────────────
+  // ── File watcher ──────────────────────────────────────────────────────
   if (getWorkspaceRoot()) {
     const envWatcher =
       vscode.workspace.createFileSystemWatcher('**/.env.local');
@@ -241,7 +239,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(envWatcher);
   }
 
-  // ── Disposables ───────────────────────────────────────────────────────────
+  // ── Disposables ───────────────────────────────────────────────────────
   context.subscriptions.push({
     dispose: () => {
       agent.dispose();
@@ -256,7 +254,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   logger.info('BNA extension activated');
 
-  // ── Initialize auth on startup (async, non-blocking) ──────────────────────
+  // ── Initialize auth on startup ────────────────────────────────────────
   initializeOnActivation().catch((err) => {
     logger.error('Initialization error:', err);
   });

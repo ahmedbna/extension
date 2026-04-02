@@ -1,30 +1,38 @@
+// src/agent/BNAAgent.ts
+//
+// Direct Anthropic Agent — calls the Anthropic Messages API directly,
+// executes tools on the real file system, and deducts credits via Convex.
+//
+// Flow:
+//   1. Fetch Anthropic API key from Convex (extensionKeys table)
+//   2. Build system prompt from bna-agent prompts
+//   3. Call Anthropic Messages API with streaming
+//   4. When tool_use blocks arrive → execute locally → feed tool_result back
+//   5. Loop until stop_reason === 'end_turn'
+//   6. Deduct credits based on token usage
+
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { TokenStore } from '../auth/TokenStore';
 import { AuthManager } from '../auth/AuthManager';
-import {
-  ToolExecutor,
-  type ToolCall,
-  type ToolResult,
-} from '../tools/ToolExecutor';
+import { ToolExecutor, type ToolCall, type ToolResult } from './ToolExecutor';
 import { CreditsManager } from '../credits/CreditsManager';
 import { ConvexProjectManager } from '../convex/ConvexProjectManager';
 import { StreamingArtifactParser } from './StreamingArtifactParser';
 import { MessageHistory } from './MessageHistory';
-import { BNA_API_BASE_URL, EXCLUDED_FILE_PATHS } from '../constants';
+import { SystemPromptBuilder } from './SystemPromptBuilder';
+import { EXCLUDED_FILE_PATHS } from '../constants';
 import { logger } from '../utils/logger';
 import { executeFileTool } from '../tools/FileTools';
-import { SystemPromptBuilder } from './SystemPromptBuilder';
+import { ANTHROPIC_API_KEY } from '../keys/keys';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  parts?: Array<{
-    type: string;
-    text?: string;
-    toolInvocation?: any;
-  }>;
+  parts?: Array<{ type: string; text?: string; toolInvocation?: any }>;
   annotations?: any[];
 }
 
@@ -36,7 +44,8 @@ export interface StreamEvent {
     | 'finish'
     | 'error'
     | 'file-write'
-    | 'auth-required';
+    | 'auth-required'
+    | 'status';
   content?: string;
   toolCall?: ToolCall;
   toolResult?: ToolResult;
@@ -44,21 +53,32 @@ export interface StreamEvent {
   error?: string;
 }
 
-/**
- * BNA AI Agent — Direct Anthropic Mode
- *
- * Instead of calling the BNA API (/api/extension-chat), this agent calls the Anthropic
- * API directly. This allows the agentic loop (tool call → execute → feed result
- * back) to happen entirely within the extension, using the real file system.
- *
- * Credit deduction is done via a separate call to the BNA server after each
- * generation completes.
- *
- * Two modes are supported:
- *   1. Direct mode (user provides their own ANTHROPIC_API_KEY in settings)
- *   2. Proxy mode (calls /api/extension-chat on BNA server, which proxies to
- *      Anthropic and handles credits)
- */
+/** Anthropic content block types */
+type TextBlock = { type: 'text'; text: string };
+type ToolUseBlock = { type: 'tool_use'; id: string; name: string; input: any };
+type ToolResultBlock = {
+  type: 'tool_result';
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+};
+type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+
+/** Anthropic message format */
+interface AnthropicMessage {
+  role: 'user' | 'assistant';
+  content: string | ContentBlock[];
+}
+
+// Maximum agentic loop iterations to prevent runaway
+const MAX_TOOL_ROUNDS = 25;
+
+// Anthropic model to use
+const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+const MAX_TOKENS = 128000;
+
+// ─── Agent ───────────────────────────────────────────────────────────────────
+
 export class BNAAgent {
   private messages: ChatMessage[] = [];
   private chatId: string;
@@ -68,6 +88,14 @@ export class BNAAgent {
   private abortController: AbortController | null = null;
   private artifactParser: StreamingArtifactParser;
   private messageHistory: MessageHistory;
+
+  // Accumulated token usage across the entire conversation turn
+  private turnUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreation: 0,
+    cacheRead: 0,
+  };
 
   constructor(
     private readonly tokenStore: TokenStore,
@@ -104,12 +132,10 @@ export class BNAAgent {
     return [...this.messages];
   }
 
-  /**
-   * Send a user message and stream the AI response.
-   * Validates auth before making the request.
-   */
+  // ─── Main entry point ────────────────────────────────────────────────────
+
   async sendMessage(userMessage: string): Promise<void> {
-    // ── Auth gate ──────────────────────────────────────────────
+    // Auth gate
     const isAuth = await this.authManager.isAuthenticated();
     if (!isAuth) {
       this._onStreamEvent.fire({
@@ -120,18 +146,31 @@ export class BNAAgent {
     }
 
     // Add user message
-    const userMsg: ChatMessage = {
+    this.messages.push({
       id: crypto.randomUUID(),
       role: 'user',
       content: userMessage,
       parts: [{ type: 'text', text: userMessage }],
-    };
-    this.messages.push(userMsg);
+    });
 
     this.abortController = new AbortController();
+    this.turnUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreation: 0,
+      cacheRead: 0,
+    };
 
     try {
-      await this.callBNAProxy(this.abortController.signal);
+      this._onStreamEvent.fire({ type: 'status', content: 'Thinking...' });
+
+      // Run the agentic loop
+      await this.agenticLoop(ANTHROPIC_API_KEY, this.abortController.signal);
+
+      // Deduct credits
+      await this.deductCredits();
+
+      this._onStreamEvent.fire({ type: 'finish' });
     } catch (err: any) {
       if (err.name === 'AbortError') {
         this._onStreamEvent.fire({
@@ -140,16 +179,13 @@ export class BNAAgent {
         });
         return;
       }
-
       if (this.isAuthError(err)) {
-        logger.warn('Auth error during API call — token may be expired');
         this._onStreamEvent.fire({
           type: 'auth-required',
           error: 'Your session has expired. Please sign in again.',
         });
         return;
       }
-
       logger.error('Agent error:', err);
       this._onStreamEvent.fire({
         type: 'error',
@@ -158,44 +194,199 @@ export class BNAAgent {
     }
   }
 
+  // ─── Agentic loop ────────────────────────────────────────────────────────
+
   /**
-   * Process an Anthropic SSE stream.
-   * Returns the stop reason and any tool_use blocks.
+   * The core loop: call Anthropic → if tool_use → execute → feed result → repeat.
+   * Continues until stop_reason is 'end_turn' or we hit MAX_TOOL_ROUNDS.
    */
-  private async processAnthropicStream(
+  private async agenticLoop(
+    apiKey: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // Build the conversation in Anthropic format
+    const anthropicMessages: AnthropicMessage[] = this.buildAnthropicMessages();
+    const systemPrompt = SystemPromptBuilder.build();
+    const tools = SystemPromptBuilder.getToolDefinitions();
+
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      if (signal.aborted) break;
+
+      // Call Anthropic Messages API with streaming
+      const result = await this.callAnthropic({
+        apiKey,
+        system: systemPrompt,
+        messages: anthropicMessages,
+        tools,
+        signal,
+      });
+
+      // Accumulate usage
+      if (result.usage) {
+        this.turnUsage.inputTokens += result.usage.input_tokens || 0;
+        this.turnUsage.outputTokens += result.usage.output_tokens || 0;
+        this.turnUsage.cacheCreation +=
+          result.usage.cache_creation_input_tokens || 0;
+        this.turnUsage.cacheRead += result.usage.cache_read_input_tokens || 0;
+      }
+
+      // Add assistant message to conversation
+      anthropicMessages.push({
+        role: 'assistant',
+        content: result.contentBlocks,
+      });
+
+      // Also track in our internal messages for the webview
+      const textContent = result.contentBlocks
+        .filter((b): b is TextBlock => b.type === 'text')
+        .map((b) => b.text)
+        .join('');
+
+      if (textContent) {
+        this.messages.push({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: textContent,
+        });
+      }
+
+      // If no tool use, we're done
+      if (result.stopReason !== 'tool_use') {
+        break;
+      }
+
+      // Execute all tool_use blocks
+      const toolUseBlocks = result.contentBlocks.filter(
+        (b): b is ToolUseBlock => b.type === 'tool_use',
+      );
+
+      if (toolUseBlocks.length === 0) break;
+
+      const toolResultBlocks: ToolResultBlock[] = [];
+
+      for (const toolUse of toolUseBlocks) {
+        if (signal.aborted) break;
+
+        this._onStreamEvent.fire({
+          type: 'tool-call',
+          toolCall: {
+            toolCallId: toolUse.id,
+            toolName: toolUse.name,
+            args: toolUse.input,
+          },
+        });
+
+        this._onStreamEvent.fire({
+          type: 'status',
+          content: `Running ${formatToolName(toolUse.name)}...`,
+        });
+
+        const toolResult = await this.toolExecutor.execute({
+          toolCallId: toolUse.id,
+          toolName: toolUse.name,
+          args: toolUse.input,
+        });
+
+        this._onStreamEvent.fire({ type: 'tool-result', toolResult });
+
+        toolResultBlocks.push({
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: toolResult.result,
+          is_error: toolResult.isError,
+        });
+      }
+
+      // Add tool results as a user message (Anthropic format)
+      anthropicMessages.push({ role: 'user', content: toolResultBlocks });
+
+      this._onStreamEvent.fire({ type: 'status', content: 'Thinking...' });
+    }
+  }
+
+  // ─── Anthropic API call with streaming ───────────────────────────────────
+
+  private async callAnthropic(args: {
+    apiKey: string;
+    system: string;
+    messages: AnthropicMessage[];
+    tools: any[];
+    signal: AbortSignal;
+  }): Promise<{
+    stopReason: string;
+    contentBlocks: ContentBlock[];
+    usage: any;
+  }> {
+    const body = {
+      model: ANTHROPIC_MODEL,
+      max_tokens: MAX_TOKENS,
+      system: args.system,
+      messages: args.messages,
+      tools: args.tools,
+      stream: true,
+    };
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': args.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: args.signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      if (response.status === 401) {
+        throw new Error(
+          'Invalid Anthropic API key. Please check your key in settings.',
+        );
+      }
+      if (response.status === 429) {
+        throw new Error(
+          'Anthropic rate limit exceeded. Please wait a moment and try again.',
+        );
+      }
+      throw new Error(`Anthropic API error (${response.status}): ${text}`);
+    }
+
+    if (!response.body) {
+      throw new Error('No response body from Anthropic');
+    }
+
+    return this.processAnthropicSSE(response.body, args.signal);
+  }
+
+  /**
+   * Process Anthropic SSE stream and collect content blocks.
+   * Also streams text deltas to the webview in real-time.
+   */
+  private async processAnthropicSSE(
     body: ReadableStream<Uint8Array>,
     signal: AbortSignal,
   ): Promise<{
     stopReason: string;
-    toolUses: Array<{ id: string; name: string; input: any }>;
-    contentBlocks: any[];
+    contentBlocks: ContentBlock[];
+    usage: any;
   }> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let stopReason = 'end_turn';
-    const toolUses: Array<{ id: string; name: string; input: any }> = [];
-    const contentBlocks: any[] = [];
+    let usage: any = {};
 
-    // Track current content block for streaming
+    // Content block tracking
+    const contentBlocks: ContentBlock[] = [];
     let currentBlockType: string | null = null;
-    let currentBlockIndex = -1;
+    let currentText = '';
     let currentToolUse: { id: string; name: string; inputJson: string } | null =
       null;
-
-    let currentAssistantMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: '',
-      parts: [],
-      annotations: [],
-    };
-    this.messages.push(currentAssistantMsg);
 
     try {
       while (true) {
         if (signal.aborted) break;
-
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -208,124 +399,112 @@ export class BNAAgent {
           const data = line.slice(6).trim();
           if (data === '[DONE]') continue;
 
+          let event: any;
           try {
-            const event = JSON.parse(data);
+            event = JSON.parse(data);
+          } catch {
+            continue;
+          }
 
-            switch (event.type) {
-              case 'content_block_start': {
-                currentBlockIndex = event.index;
-                const block = event.content_block;
-                currentBlockType = block.type;
-
-                if (block.type === 'tool_use') {
-                  currentToolUse = {
-                    id: block.id,
-                    name: block.name,
-                    inputJson: '',
-                  };
-                  this._onStreamEvent.fire({
-                    type: 'tool-call',
-                    toolCall: {
-                      toolCallId: block.id,
-                      toolName: block.name,
-                      args: {},
-                    },
-                  });
-                }
-                break;
+          switch (event.type) {
+            case 'message_start': {
+              if (event.message?.usage) {
+                usage = { ...usage, ...event.message.usage };
               }
-
-              case 'content_block_delta': {
-                const delta = event.delta;
-                if (delta.type === 'text_delta') {
-                  currentAssistantMsg.content += delta.text;
-                  const cleanText = this.artifactParser.feed(delta.text);
-                  if (cleanText) {
-                    this._onStreamEvent.fire({
-                      type: 'text',
-                      content: cleanText,
-                    });
-                  }
-                } else if (delta.type === 'input_json_delta') {
-                  if (currentToolUse) {
-                    currentToolUse.inputJson += delta.partial_json;
-                  }
-                }
-                break;
-              }
-
-              case 'content_block_stop': {
-                if (currentBlockType === 'text') {
-                  contentBlocks.push({
-                    type: 'text',
-                    text: currentAssistantMsg.content,
-                  });
-                } else if (currentBlockType === 'tool_use' && currentToolUse) {
-                  let input = {};
-                  try {
-                    if (currentToolUse.inputJson) {
-                      input = JSON.parse(currentToolUse.inputJson);
-                    }
-                  } catch {
-                    logger.warn('Failed to parse tool input JSON');
-                  }
-
-                  const toolUseBlock = {
-                    type: 'tool_use' as const,
-                    id: currentToolUse.id,
-                    name: currentToolUse.name,
-                    input,
-                  };
-                  contentBlocks.push(toolUseBlock);
-                  toolUses.push({
-                    id: currentToolUse.id,
-                    name: currentToolUse.name,
-                    input,
-                  });
-                  currentToolUse = null;
-                }
-                currentBlockType = null;
-                break;
-              }
-
-              case 'message_delta': {
-                if (event.delta?.stop_reason) {
-                  stopReason = event.delta.stop_reason;
-                }
-                break;
-              }
-
-              case 'message_stop': {
-                break;
-              }
-
-              case 'error': {
-                throw new Error(
-                  event.error?.message || 'Anthropic stream error',
-                );
-              }
+              break;
             }
-          } catch (parseErr: any) {
-            if (parseErr.message?.includes('Anthropic')) throw parseErr;
-            logger.debug('Failed to parse SSE event:', data);
+
+            case 'content_block_start': {
+              const block = event.content_block;
+              currentBlockType = block.type;
+
+              if (block.type === 'text') {
+                currentText = block.text || '';
+              } else if (block.type === 'tool_use') {
+                currentToolUse = {
+                  id: block.id,
+                  name: block.name,
+                  inputJson: '',
+                };
+              }
+              break;
+            }
+
+            case 'content_block_delta': {
+              const delta = event.delta;
+              if (delta.type === 'text_delta') {
+                currentText += delta.text;
+                // Stream text through artifact parser → webview
+                const cleanText = this.artifactParser.feed(delta.text);
+                if (cleanText) {
+                  this._onStreamEvent.fire({
+                    type: 'text',
+                    content: cleanText,
+                  });
+                }
+              } else if (delta.type === 'input_json_delta' && currentToolUse) {
+                currentToolUse.inputJson += delta.partial_json;
+              }
+              break;
+            }
+
+            case 'content_block_stop': {
+              if (currentBlockType === 'text') {
+                contentBlocks.push({ type: 'text', text: currentText });
+                currentText = '';
+              } else if (currentBlockType === 'tool_use' && currentToolUse) {
+                let input = {};
+                try {
+                  if (currentToolUse.inputJson) {
+                    input = JSON.parse(currentToolUse.inputJson);
+                  }
+                } catch {
+                  logger.warn('Failed to parse tool input JSON');
+                }
+                contentBlocks.push({
+                  type: 'tool_use',
+                  id: currentToolUse.id,
+                  name: currentToolUse.name,
+                  input,
+                });
+                currentToolUse = null;
+              }
+              currentBlockType = null;
+              break;
+            }
+
+            case 'message_delta': {
+              if (event.delta?.stop_reason) {
+                stopReason = event.delta.stop_reason;
+              }
+              if (event.usage) {
+                usage = { ...usage, ...event.usage };
+              }
+              break;
+            }
+
+            case 'error': {
+              throw new Error(event.error?.message || 'Anthropic stream error');
+            }
           }
         }
       }
     } finally {
       reader.releaseLock();
+      // Flush any remaining artifact parser buffer
+      this.artifactParser.flush();
     }
 
-    return { stopReason, toolUses, contentBlocks };
+    return { stopReason, contentBlocks, usage };
   }
 
-  /**
-   * Build Anthropic-format messages from the internal chat history.
-   */
-  private buildAnthropicMessages(): any[] {
-    const msgs: any[] = [];
+  // ─── Build Anthropic-format messages ─────────────────────────────────────
+
+  private buildAnthropicMessages(): AnthropicMessage[] {
+    const msgs: AnthropicMessage[] = [];
 
     for (const msg of this.messages) {
-      if (msg.role === 'system') continue; // System prompt is separate
+      if (msg.role === 'system') continue;
       if (msg.role === 'user') {
         msgs.push({ role: 'user', content: msg.content });
       } else if (msg.role === 'assistant') {
@@ -336,273 +515,45 @@ export class BNAAgent {
     return msgs;
   }
 
-  /**
-   * Proxy mode — call the BNA server's extension-specific endpoint.
-   * The server proxies to Anthropic and handles credit deduction.
-   * Tool calls come back via SSE and are executed locally.
-   */
-  private async callBNAProxy(signal: AbortSignal): Promise<void> {
-    const token = await this.tokenStore.getConvexAuthToken();
-    const accessToken = await this.tokenStore.getConvexAccessToken();
-    const teamSlug = await this.tokenStore.getTeamSlug();
-    const userId = await this.tokenStore.getUserId();
-    const projectInfo = this.projectManager.getProjectInfo();
+  // ─── Credit deduction ────────────────────────────────────────────────────
 
-    if (!token) {
-      throw new AuthError('No valid auth token. Please sign in.');
-    }
-
-    if (!accessToken || !teamSlug) {
-      throw new Error(
-        'Not connected to Convex. Please connect your Convex account.',
-      );
-    }
-
-    const body = {
-      messages: this.messages.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        parts: m.parts,
-        annotations: m.annotations,
-      })),
-      firstUserMessage:
-        this.messages.filter((m) => m.role === 'user').length === 1,
-      chatInitialId: this.chatId,
-      token: accessToken,
-      teamSlug,
-      deploymentName: projectInfo?.deploymentName,
-      shouldDisableTools: false,
-      recordRawPromptsForDebugging: false,
-      collapsedMessages: false,
-      userId: userId || undefined,
-      featureFlags: {
-        enableResend: false,
-      },
-    };
-
-    const response = await fetch(`${BNA_API_BASE_URL}/api/extension-chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-
-    if (response.status === 401 || response.status === 403) {
-      throw new AuthError('Authentication failed. Please sign in again.');
-    }
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`API error (${response.status}): ${text}`);
-    }
-
-    if (!response.body) {
-      throw new Error('No response body');
-    }
-
-    await this.processVercelAIStream(response.body, signal);
-  }
-
-  /**
-   * Process the Vercel AI SDK data stream protocol from the BNA API.
-   * 0: text delta, 9: tool call, a: tool result, e: finish, d: error
-   */
-  private async processVercelAIStream(
-    body: ReadableStream<Uint8Array>,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-
-    let currentAssistantMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: '',
-      parts: [],
-      annotations: [],
-    };
-    this.messages.push(currentAssistantMsg);
-
-    let buffer = '';
-
+  private async deductCredits(): Promise<void> {
     try {
-      while (true) {
-        if (signal.aborted) break;
-
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-
-          try {
-            await this.processStreamLine(line, currentAssistantMsg, signal);
-          } catch (err) {
-            logger.debug('Failed to process stream line:', line, err);
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    this._onStreamEvent.fire({ type: 'finish' });
-  }
-
-  /**
-   * Process a single line from the Vercel AI data stream.
-   */
-  private async processStreamLine(
-    line: string,
-    assistantMsg: ChatMessage,
-    signal: AbortSignal,
-  ): Promise<void> {
-    if (line.length < 2) return;
-
-    const type = line[0];
-    const data = line.slice(2);
-
-    switch (type) {
-      case '0': {
-        try {
-          const text = JSON.parse(data) as string;
-          assistantMsg.content += text;
-          const cleanText = this.artifactParser.feed(text);
-          if (cleanText) {
-            this._onStreamEvent.fire({ type: 'text', content: cleanText });
-          }
-        } catch {
-          assistantMsg.content += data;
-          this._onStreamEvent.fire({ type: 'text', content: data });
-        }
-        break;
-      }
-
-      case '9': {
-        try {
-          const toolCall = JSON.parse(data) as {
-            toolCallId: string;
-            toolName: string;
-            args: any;
-          };
-
-          this._onStreamEvent.fire({
-            type: 'tool-call',
-            toolCall: {
-              toolCallId: toolCall.toolCallId,
-              toolName: toolCall.toolName,
-              args: toolCall.args,
-            },
-          });
-
-          if (!signal.aborted) {
-            const result = await this.toolExecutor.execute({
-              toolCallId: toolCall.toolCallId,
-              toolName: toolCall.toolName,
-              args: toolCall.args,
-            });
-
-            this._onStreamEvent.fire({
-              type: 'tool-result',
-              toolResult: result,
-            });
-          }
-        } catch (err) {
-          logger.error('Error processing tool call:', err);
-        }
-        break;
-      }
-
-      case '2': {
-        try {
-          const annotations = JSON.parse(data) as any[];
-          if (assistantMsg.annotations) {
-            assistantMsg.annotations.push(...annotations);
-          }
-        } catch {
-          // Ignore annotation parse errors
-        }
-        break;
-      }
-
-      case 'e': {
-        this._onStreamEvent.fire({ type: 'finish' });
-        break;
-      }
-
-      case 'd': {
-        try {
-          const errorData = JSON.parse(data);
-          const errorMsg =
-            typeof errorData === 'string'
-              ? errorData
-              : JSON.stringify(errorData);
-
-          if (
-            errorMsg.includes('auth') ||
-            errorMsg.includes('unauthorized') ||
-            errorMsg.includes('token')
-          ) {
-            this._onStreamEvent.fire({
-              type: 'auth-required',
-              error: 'Session expired. Please sign in again.',
-            });
-          } else {
-            this._onStreamEvent.fire({ type: 'error', error: errorMsg });
-          }
-        } catch {
-          this._onStreamEvent.fire({ type: 'error', error: data });
-        }
-        break;
-      }
-    }
-  }
-
-  /**
-   * Report token usage to BNA server for credit tracking.
-   * Fire-and-forget — doesn't block the user.
-   */
-  private async reportUsageToServer(): Promise<void> {
-    try {
-      const token = await this.tokenStore.getConvexAuthToken();
       const userId = await this.tokenStore.getUserId();
-      if (!token || !userId) return;
+      if (!userId) return;
 
-      // Estimate token usage (rough approximation)
-      const totalChars = this.messages.reduce(
-        (sum, m) => sum + m.content.length,
-        0,
-      );
-      const estimatedTokens = Math.ceil(totalChars / 4);
+      const totalInput =
+        this.turnUsage.inputTokens +
+        this.turnUsage.cacheCreation +
+        this.turnUsage.cacheRead;
+      const totalOutput = this.turnUsage.outputTokens;
 
-      await fetch(`${BNA_API_BASE_URL}/api/deduct-credits`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          userId,
-          tokensUsed: estimatedTokens,
-          chatInitialId: this.chatId,
-        }),
+      if (totalInput === 0 && totalOutput === 0) return;
+
+      const result = await this.creditsManager.reportUsage({
+        userId,
+        chatId: this.chatId,
+        promptTokens: totalInput,
+        completionTokens: totalOutput,
+        basePromptTokens: this.turnUsage.inputTokens,
+        cacheCreationTokens: this.turnUsage.cacheCreation,
+        cacheReadTokens: this.turnUsage.cacheRead,
       });
+
+      if (result) {
+        logger.info(
+          `Credits deducted: ${result.creditsDeducted} | Remaining: ${result.remainingCredits} | ` +
+            `Tokens: ${totalInput} in + ${totalOutput} out`,
+        );
+      }
     } catch (err) {
-      logger.debug('Usage report failed (non-fatal):', err);
+      logger.debug('Credit deduction failed (non-fatal):', err);
     }
   }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
 
   private isAuthError(err: any): boolean {
-    if (err instanceof AuthError) return true;
     const msg = (err.message || String(err)).toLowerCase();
     return (
       msg.includes('401') ||
@@ -627,6 +578,12 @@ export class BNAAgent {
     this.chatId = crypto.randomUUID();
     this.toolExecutor.reset();
     this.artifactParser.reset();
+    this.turnUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreation: 0,
+      cacheRead: 0,
+    };
   }
 
   async saveHistory(): Promise<void> {
@@ -649,9 +606,27 @@ export class BNAAgent {
   }
 }
 
-class AuthError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'AuthError';
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatToolName(name: string): string {
+  switch (name) {
+    case 'deploy':
+      return 'deploy';
+    case 'npmInstall':
+      return 'npm install';
+    case 'view':
+      return 'view file';
+    case 'edit':
+      return 'edit file';
+    case 'lookupDocs':
+      return 'docs lookup';
+    case 'lookupConvexDocsTool':
+      return 'Convex docs lookup';
+    case 'addEnvironmentVariables':
+      return 'environment variables';
+    case 'getConvexDeploymentName':
+      return 'get deployment name';
+    default:
+      return name;
   }
 }

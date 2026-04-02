@@ -1,3 +1,5 @@
+// src/constants.ts
+
 export const EXTENSION_ID = 'bna.bna-ai';
 export const EXTENSION_NAME = 'BNA';
 
@@ -15,6 +17,10 @@ export const OUTPUT_TOKENS_PER_CREDIT = 1000;
 
 export const MAX_RETRIES = 4;
 export const MAX_CONSECUTIVE_DEPLOY_ERRORS = 5;
+
+// Anthropic model configuration
+export const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+export const ANTHROPIC_MAX_TOKENS = 128000;
 
 // Files the AI agent should never modify
 export const EXCLUDED_FILE_PATHS = [
