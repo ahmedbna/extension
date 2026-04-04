@@ -1,3 +1,5 @@
+// web/src/hooks/useVSCodeAPI.ts
+
 import { useCallback, useEffect, useRef } from 'react';
 
 interface VSCodeAPI {
@@ -27,7 +29,8 @@ export type ExtensionMessage =
   | { type: 'error'; error: string }
   | { type: 'chatReset' }
   | { type: 'authState'; isAuthenticated: boolean }
-  | { type: 'authRequired'; error: string };
+  | { type: 'authRequired'; error: string }
+  | { type: 'status'; text: string };
 
 export interface ChatMsg {
   id: string;

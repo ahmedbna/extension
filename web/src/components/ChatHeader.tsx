@@ -1,3 +1,4 @@
+// web/src/components/ChatHeader.tsx
 import React from 'react';
 
 interface Props {
@@ -8,64 +9,56 @@ interface Props {
 
 export function ChatHeader({ onNewChat, onConnectConvex, onSignOut }: Props) {
   return (
-    <div style={styles.header}>
-      <div style={styles.left}>
-        <div style={styles.logo}>⚡</div>
-        <span style={styles.title}>BNA</span>
+    <div className='chat-header'>
+      <div className='chat-header-brand'>
+        <span className='chat-header-icon'>⚡</span>
+        <span className='chat-header-name'>BNA</span>
       </div>
-      <div style={styles.right}>
+      <div className='chat-header-actions'>
         <button
-          style={styles.btn}
+          className='header-btn'
           onClick={onConnectConvex}
           title='Connect Convex'
         >
-          🔗
+          <svg
+            width='14'
+            height='14'
+            viewBox='0 0 24 24'
+            fill='none'
+            stroke='currentColor'
+            strokeWidth='2'
+          >
+            <path d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71' />
+            <path d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71' />
+          </svg>
         </button>
-        <button style={styles.btn} onClick={onNewChat} title='New Chat'>
-          ＋
+        <button className='header-btn' onClick={onNewChat} title='New Chat'>
+          <svg
+            width='14'
+            height='14'
+            viewBox='0 0 24 24'
+            fill='none'
+            stroke='currentColor'
+            strokeWidth='2'
+          >
+            <path d='M12 5v14M5 12h14' />
+          </svg>
         </button>
-        <button style={styles.btn} onClick={onSignOut} title='Sign Out'>
-          ↪
+        <button className='header-btn' onClick={onSignOut} title='Sign Out'>
+          <svg
+            width='14'
+            height='14'
+            viewBox='0 0 24 24'
+            fill='none'
+            stroke='currentColor'
+            strokeWidth='2'
+          >
+            <path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4' />
+            <polyline points='16 17 21 12 16 7' />
+            <line x1='21' y1='12' x2='9' y2='12' />
+          </svg>
         </button>
       </div>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '8px 12px',
-    borderBottom:
-      '1px solid var(--vscode-widget-border, rgba(255,255,255,0.1))',
-    flexShrink: 0,
-  },
-  left: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-  },
-  logo: {
-    fontSize: 18,
-  },
-  title: {
-    fontWeight: 800,
-    fontSize: 15,
-    letterSpacing: '-0.03em',
-  },
-  right: {
-    display: 'flex',
-    gap: 4,
-  },
-  btn: {
-    background: 'rgba(255,255,255,0.06)',
-    border: '1px solid rgba(255,255,255,0.1)',
-    color: 'var(--vscode-foreground)',
-    borderRadius: 6,
-    padding: '4px 8px',
-    cursor: 'pointer',
-    fontSize: 13,
-  },
-};

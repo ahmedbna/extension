@@ -1,21 +1,333 @@
+// src/terminal/TerminalManager.ts
+//
+// Updated terminal manager with:
+// 1. Smart deploy: npx convex dev + TypeScript check + fix errors loop
+// 2. Platform detection (mac → ios, otherwise android)
+// 3. Template setup: npm install + npx convex dev + npx @convex-dev/auth
+
 import * as vscode from 'vscode';
+import * as os from 'os';
 import { logger } from '../utils/logger';
 import { getWorkspaceRoot } from '../utils/workspace';
 
-/**
- * Manages VS Code integrated terminals for BNA operations.
- * Replaces the WebContainer terminal from the web app.
- */
+export interface CommandResult {
+  exitCode: number;
+  output: string;
+}
+
+export interface DeployResult {
+  exitCode: number;
+  output: string;
+  typeErrors?: TypeScriptError[];
+}
+
+export interface TypeScriptError {
+  file: string;
+  line: number;
+  column: number;
+  message: string;
+  raw: string;
+}
+
 export class TerminalManager {
   private terminals: Map<string, vscode.Terminal> = new Map();
-  private outputBuffers: Map<string, string> = new Map();
+
+  // ─── Platform Detection ────────────────────────────────────────────────
+  isMac(): boolean {
+    return os.platform() === 'darwin';
+  }
+
+  getExpoRunCommand(): string {
+    return this.isMac() ? 'npx expo run:ios' : 'npx expo run:android';
+  }
+
+  // ─── Core Command Execution ────────────────────────────────────────────
+
+  async executeCommand(
+    terminalName: string,
+    command: string,
+    options?: { show?: boolean; cwd?: string; timeout?: number },
+  ): Promise<CommandResult> {
+    const root = options?.cwd || getWorkspaceRoot();
+
+    return new Promise<CommandResult>((resolve, reject) => {
+      const { exec } = require('child_process');
+
+      let output = '';
+      const child = exec(command, {
+        cwd: root,
+        maxBuffer: 1024 * 1024 * 20, // 20MB
+        timeout: options?.timeout || 300_000,
+        env: {
+          ...process.env,
+          PATH: `${root}/node_modules/.bin:${process.env.PATH}`,
+          CI: 'true',
+          FORCE_COLOR: '0',
+          NO_COLOR: '1',
+        },
+      });
+
+      child.stdout?.on('data', (data: string) => {
+        output += data;
+      });
+
+      child.stderr?.on('data', (data: string) => {
+        output += data;
+      });
+
+      child.on('close', (code: number | null) => {
+        resolve({ exitCode: code ?? 1, output });
+      });
+
+      child.on('error', (err: Error) => {
+        reject(err);
+      });
+
+      if (options?.show) {
+        const terminal = this.getTerminal(terminalName);
+        terminal.show();
+        terminal.sendText(command);
+      }
+    });
+  }
+
+  // ─── TypeScript Error Parsing ──────────────────────────────────────────
+
+  parseTypeScriptErrors(output: string): TypeScriptError[] {
+    const errors: TypeScriptError[] = [];
+    const lines = output.split('\n');
+
+    for (const line of lines) {
+      // Match TypeScript error format: file.ts(line,col): error TS1234: message
+      const match = line.match(
+        /^(.+)\((\d+),(\d+)\):\s+error\s+(TS\d+:\s+.+)$/,
+      );
+      if (match) {
+        errors.push({
+          file: match[1].trim(),
+          line: parseInt(match[2]),
+          column: parseInt(match[3]),
+          message: match[4].trim(),
+          raw: line.trim(),
+        });
+      }
+    }
+
+    return errors;
+  }
+
+  // ─── Template Setup ────────────────────────────────────────────────────
 
   /**
-   * Get or create a named terminal.
+   * Full template setup:
+   * 1. npm install
+   * 2. npx convex dev (initial deploy)
+   * 3. npx @convex-dev/auth (setup auth, -y to accept all)
    */
+  async setupTemplate(): Promise<{ success: boolean; output: string }> {
+    const outputs: string[] = [];
+
+    // Step 1: npm install
+    logger.info('Template setup: running npm install...');
+    const install = await this.executeCommand(
+      'setup',
+      'npm install --legacy-peer-deps',
+      { show: true, timeout: 300_000 },
+    );
+    outputs.push('[npm install]\n' + install.output);
+    if (install.exitCode !== 0) {
+      return { success: false, output: outputs.join('\n\n') };
+    }
+
+    // Step 2: npx convex dev (run briefly to init, then kill)
+    logger.info('Template setup: initializing Convex...');
+    const convexInit = await this.executeCommandWithTimeout(
+      'npx convex dev',
+      30_000, // 30 seconds — enough to init
+    );
+    outputs.push('[convex init]\n' + convexInit.output);
+
+    // Step 3: npx @convex-dev/auth -y
+    logger.info('Template setup: setting up Convex Auth...');
+    const authSetup = await this.executeCommand(
+      'setup',
+      'echo "y\ny\ny\ny\ny" | npx @convex-dev/auth',
+      { timeout: 120_000 },
+    );
+    outputs.push('[convex auth setup]\n' + authSetup.output);
+
+    return {
+      success: true,
+      output: outputs.join('\n\n'),
+    };
+  }
+
+  /**
+   * Execute a command with a hard timeout (kills after timeout, treats partial success as ok).
+   */
+  private async executeCommandWithTimeout(
+    command: string,
+    timeoutMs: number,
+  ): Promise<CommandResult> {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      const root = getWorkspaceRoot();
+      let output = '';
+
+      const child = spawn('sh', ['-c', command], {
+        cwd: root,
+        env: {
+          ...process.env,
+          CI: 'true',
+          FORCE_COLOR: '0',
+          NO_COLOR: '1',
+        },
+      });
+
+      child.stdout?.on('data', (data: Buffer) => {
+        output += data.toString();
+      });
+      child.stderr?.on('data', (data: Buffer) => {
+        output += data.toString();
+      });
+
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({ exitCode: 0, output }); // treat timeout as success for init
+      }, timeoutMs);
+
+      child.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        resolve({ exitCode: code ?? 0, output });
+      });
+    });
+  }
+
+  // ─── Smart Deploy ──────────────────────────────────────────────────────
+
+  /**
+   * Smart deploy flow:
+   * 1. npx convex dev --once (deploy backend)
+   * 2. npx tsc --noEmit (check for TypeScript errors)
+   * 3. If errors found, return them for the AI to fix
+   * 4. If no errors, start Expo dev server
+   *
+   * Returns errors if any, so the agent can fix them.
+   */
+  async smartDeploy(): Promise<DeployResult> {
+    logger.info('Smart deploy: starting...');
+
+    // Step 1: Deploy Convex backend
+    const convexResult = await this.executeCommand(
+      'deploy',
+      'npx convex dev --once --typecheck=disable',
+      { timeout: 180_000 },
+    );
+
+    if (convexResult.exitCode !== 0) {
+      return {
+        exitCode: convexResult.exitCode,
+        output: `[ConvexDeploy Error]\n${convexResult.output}`,
+      };
+    }
+
+    // Step 2: TypeScript check
+    const tscResult = await this.executeCommand(
+      'deploy',
+      'npx tsc --noEmit --pretty false 2>&1',
+      { timeout: 120_000 },
+    );
+
+    const typeErrors = this.parseTypeScriptErrors(tscResult.output);
+
+    if (typeErrors.length > 0 || tscResult.exitCode !== 0) {
+      return {
+        exitCode: tscResult.exitCode,
+        output: `[TypeScript Errors]\n${tscResult.output}`,
+        typeErrors,
+      };
+    }
+
+    // Step 3: All good — start Expo dev server
+    const platform = this.isMac() ? 'ios' : 'android';
+    logger.info(`Smart deploy: starting Expo on ${platform}...`);
+
+    // Show notification to user
+    vscode.window
+      .showInformationMessage(
+        `✅ Deployed! Starting Expo on ${platform}...`,
+        'Open Terminal',
+      )
+      .then((choice) => {
+        if (choice === 'Open Terminal') {
+          this.getTerminal('Expo').show();
+        }
+      });
+
+    // Start expo in background terminal (non-blocking)
+    this.startExpoDevServer(platform);
+
+    const totalOutput = [convexResult.output, tscResult.output]
+      .filter(Boolean)
+      .join('\n');
+
+    return { exitCode: 0, output: totalOutput || 'Deployed successfully.' };
+  }
+
+  /**
+   * Convex-only deploy (used by the deploy tool for quick iterations).
+   */
+  async convexDeploy(): Promise<CommandResult> {
+    logger.info('Running Convex deploy...');
+
+    // Codegen
+    const codegen = await this.executeCommand('deploy', 'npx convex codegen', {
+      timeout: 60_000,
+    });
+    if (codegen.exitCode !== 0) {
+      return {
+        exitCode: codegen.exitCode,
+        output: `[Codegen]\n${codegen.output}`,
+      };
+    }
+
+    // Deploy
+    const deploy = await this.executeCommand(
+      'deploy',
+      'npx convex dev --once --typecheck=disable',
+      { timeout: 180_000 },
+    );
+
+    return {
+      exitCode: deploy.exitCode,
+      output: [codegen.output, deploy.output].filter(Boolean).join('\n'),
+    };
+  }
+
+  // ─── npm install ───────────────────────────────────────────────────────
+
+  async npmInstall(packages: string): Promise<CommandResult> {
+    const command = `npx expo install ${packages}`;
+    logger.info(`Running: ${command}`);
+    return this.executeCommand('npm', command, {
+      show: true,
+      timeout: 180_000,
+    });
+  }
+
+  // ─── Expo Dev Server ───────────────────────────────────────────────────
+
+  startExpoDevServer(platform: 'ios' | 'android' = 'ios'): void {
+    const terminal = this.getTerminal('Expo');
+    terminal.show();
+    terminal.sendText(`npx expo run:${platform}`);
+  }
+
+  // ─── Terminal Management ───────────────────────────────────────────────
+
   getTerminal(name: string): vscode.Terminal {
     const existing = this.terminals.get(name);
-    if (existing && !this.isTerminalClosed(existing)) {
+    if (existing && existing.exitStatus === undefined) {
       return existing;
     }
 
@@ -30,145 +342,27 @@ export class TerminalManager {
     return terminal;
   }
 
-  /**
-   * Execute a command in a terminal and capture output.
-   * Uses a temporary file to capture exit code since VS Code terminals
-   * don't provide direct output access.
-   */
-  async executeCommand(
-    terminalName: string,
-    command: string,
-    options?: {
-      show?: boolean;
-      cwd?: string;
-    }
-  ): Promise<{ exitCode: number; output: string }> {
-    const root = options?.cwd || getWorkspaceRoot();
-
-    return new Promise<{ exitCode: number; output: string }>((resolve, reject) => {
-      // Use child_process for commands where we need output capture
-      const { exec } = require('child_process');
-      
-      let output = '';
-      const child = exec(command, {
-        cwd: root,
-        maxBuffer: 1024 * 1024 * 10, // 10MB
-        env: {
-          ...process.env,
-          // Ensure we use the project's node_modules
-          PATH: `${root}/node_modules/.bin:${process.env.PATH}`,
-        },
-      });
-
-      child.stdout?.on('data', (data: string) => {
-        output += data;
-      });
-
-      child.stderr?.on('data', (data: string) => {
-        output += data;
-      });
-
-      child.on('close', (code: number | null) => {
-        resolve({
-          exitCode: code ?? 1,
-          output,
-        });
-      });
-
-      child.on('error', (err: Error) => {
-        reject(err);
-      });
-
-      // Show terminal output in VS Code
-      if (options?.show) {
-        const terminal = this.getTerminal(terminalName);
-        terminal.show();
-        terminal.sendText(command);
-      }
-    });
-  }
-
-  /**
-   * Run a command in a visible terminal (fire-and-forget, user can see output).
-   */
   runInTerminal(terminalName: string, command: string): void {
     const terminal = this.getTerminal(terminalName);
     terminal.show();
     terminal.sendText(command);
   }
 
-  /**
-   * Run npm install with output capture.
-   */
-  async npmInstall(packages: string): Promise<{ exitCode: number; output: string }> {
-    const command = `npx expo install ${packages}`;
-    logger.info(`Running: ${command}`);
-    return this.executeCommand('npm', command, { show: true });
-  }
-
-  /**
-   * Run convex codegen + typecheck + deploy.
-   */
-  async convexDeploy(): Promise<{ exitCode: number; output: string }> {
-    logger.info('Running Convex deploy...');
-
-    // Step 1: Codegen
-    const codegen = await this.executeCommand('deploy', 'npx convex codegen');
-    if (codegen.exitCode !== 0) {
-      return { exitCode: codegen.exitCode, output: `[ConvexTypecheck] ${codegen.output}` };
-    }
-
-    // Step 2: TypeScript check
-    const tsc = await this.executeCommand('deploy', 'npx tsc --noEmit');
-    if (tsc.exitCode !== 0) {
-      return { exitCode: tsc.exitCode, output: `[FrontendTypecheck] ${tsc.output}` };
-    }
-
-    // Step 3: Deploy
-    const deploy = await this.executeCommand('deploy', 'npx convex dev --once --typecheck=disable');
-    if (deploy.exitCode !== 0) {
-      return { exitCode: deploy.exitCode, output: `[ConvexDeploy] ${deploy.output}` };
-    }
-
-    const totalOutput = [codegen.output, tsc.output, deploy.output].filter(Boolean).join('\n');
-    return { exitCode: 0, output: totalOutput };
-  }
-
-  /**
-   * Start Expo dev server.
-   */
-  startExpoDevServer(platform: 'ios' | 'android' = 'ios'): void {
-    const terminal = this.getTerminal('Expo');
-    terminal.show();
-    terminal.sendText(`npx expo run:${platform}`);
-  }
-
-  private isTerminalClosed(terminal: vscode.Terminal): boolean {
-    // VS Code doesn't have a direct API to check if a terminal is closed.
-    // We rely on the onDidCloseTerminal event to clean up.
-    return terminal.exitStatus !== undefined;
-  }
-
-  /**
-   * Register cleanup when terminals close.
-   */
   registerTerminalCloseHandler(): vscode.Disposable {
-    return vscode.window.onDidCloseTerminal(terminal => {
+    return vscode.window.onDidCloseTerminal((terminal) => {
       for (const [name, t] of this.terminals.entries()) {
         if (t === terminal) {
           this.terminals.delete(name);
-          this.outputBuffers.delete(name);
           break;
         }
       }
     });
   }
 
-  dispose() {
+  dispose(): void {
     for (const terminal of this.terminals.values()) {
       terminal.dispose();
     }
     this.terminals.clear();
-    this.outputBuffers.clear();
   }
 }

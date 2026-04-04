@@ -1,7 +1,7 @@
 // src/agent/ToolExecutor.ts
 //
 // Executes tool calls from the AI agent on the real file system and terminal.
-// This replaces the WebContainer-based ActionRunner from the web app.
+// Includes smart deploy: TypeScript checking + error fixing loop.
 
 import * as vscode from 'vscode';
 import { TerminalManager } from '../terminal/TerminalManager';
@@ -33,7 +33,6 @@ export class ToolExecutor {
   ) {}
 
   async execute(call: ToolCall): Promise<ToolResult> {
-    // Deduplicate non-view, non-deploy calls
     if (call.toolName !== 'view' && call.toolName !== 'deploy') {
       const callKey = `${call.toolName}:${JSON.stringify(call.args)}`;
       if (this.previousToolCalls.has(callKey)) {
@@ -103,7 +102,13 @@ export class ToolExecutor {
     return executeEditTool(args.path, args.old, args.new);
   }
 
-  // ─── Deploy ────────────────────────────────────────────────────────────
+  // ─── Deploy (Smart) ────────────────────────────────────────────────────
+  //
+  // Flow:
+  // 1. Run npx convex dev --once
+  // 2. Run npx tsc --noEmit to check for TypeScript errors
+  // 3. If errors found, return them so the agent can fix + redeploy
+  // 4. If no errors, start Expo dev server (platform-aware)
 
   private async handleDeploy(): Promise<string> {
     if (this.deployErrorCount >= ToolExecutor.MAX_DEPLOY_ERRORS) {
@@ -113,32 +118,34 @@ export class ToolExecutor {
       );
     }
 
-    const result = await this.terminalManager.convexDeploy();
+    const result = await this.terminalManager.smartDeploy();
 
     if (result.exitCode !== 0) {
       this.deployErrorCount++;
-      // Return the error output so the agent can fix and retry
+
+      // Format TypeScript errors for the AI to understand and fix
+      if (result.typeErrors && result.typeErrors.length > 0) {
+        const errorSummary = result.typeErrors
+          .slice(0, 20) // limit to first 20 errors
+          .map((e) => `  ${e.file}:${e.line}:${e.column} - ${e.message}`)
+          .join('\n');
+
+        return (
+          `TypeScript errors found (attempt ${this.deployErrorCount}/${ToolExecutor.MAX_DEPLOY_ERRORS}).\n` +
+          `Please fix these errors and redeploy:\n\n${errorSummary}\n\n` +
+          `Full output:\n${result.output}`
+        );
+      }
+
       return `Deploy failed (attempt ${this.deployErrorCount}/${ToolExecutor.MAX_DEPLOY_ERRORS}):\n${result.output}`;
     }
 
     this.deployErrorCount = 0;
 
-    // Offer to start Expo dev server (non-blocking)
-    vscode.window
-      .showInformationMessage(
-        'Convex deployed! Start the dev server?',
-        'Start iOS',
-        'Start Android',
-      )
-      .then((choice) => {
-        if (choice === 'Start iOS') {
-          this.terminalManager.startExpoDevServer('ios');
-        } else if (choice === 'Start Android') {
-          this.terminalManager.startExpoDevServer('android');
-        }
-      });
-
-    return result.output || 'Deployed successfully.';
+    const platform = this.terminalManager.isMac() ? 'iOS' : 'Android';
+    return (
+      result.output || `Deployed successfully. Starting Expo on ${platform}...`
+    );
   }
 
   // ─── npm install ───────────────────────────────────────────────────────
@@ -156,20 +163,18 @@ export class ToolExecutor {
     let output = result.output;
 
     if (args.requiresNativeRebuild) {
-      output +=
-        '\n\n⚠️ Native rebuild required. Run `npx expo run:ios` or `npx expo run:android`.';
+      const rebuildCmd = this.terminalManager.getExpoRunCommand();
+      output += `\n\n⚠️ Native rebuild required. Run: \`${rebuildCmd}\``;
 
       vscode.window
         .showWarningMessage(
           'Native rebuild required after installing native module.',
-          'Rebuild iOS',
-          'Rebuild Android',
+          'Rebuild Now',
         )
         .then((choice) => {
-          if (choice === 'Rebuild iOS') {
-            this.terminalManager.runInTerminal('Expo', 'npx expo run:ios');
-          } else if (choice === 'Rebuild Android') {
-            this.terminalManager.runInTerminal('Expo', 'npx expo run:android');
+          if (choice === 'Rebuild Now') {
+            const platform = this.terminalManager.isMac() ? 'ios' : 'android';
+            this.terminalManager.startExpoDevServer(platform);
           }
         });
     }
@@ -211,15 +216,12 @@ export class ToolExecutor {
     const info = this.projectManager.getProjectInfo();
     if (info) {
       const dashboardUrl = `https://dashboard.convex.dev/d/${info.deploymentName}/settings/environment-variables`;
-
       const choice = await vscode.window.showInformationMessage(
         `Set these env vars in the Convex dashboard:\n${args.envVarNames.join(', ')}`,
         'Open Dashboard',
       );
-
       if (choice === 'Open Dashboard') {
-        const url = `${dashboardUrl}?var=${args.envVarNames.join('&var=')}`;
-        vscode.env.openExternal(vscode.Uri.parse(url));
+        vscode.env.openExternal(vscode.Uri.parse(dashboardUrl));
       }
     } else {
       vscode.window.showInformationMessage(

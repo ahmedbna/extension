@@ -1,5 +1,4 @@
-// src/components/MessageInput.tsx
-
+// web/src/components/MessageInput.tsx
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 interface Props {
@@ -13,12 +12,11 @@ export function MessageInput({ onSend, onStop, isStreaming, disabled }: Props) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
     if (el) {
       el.style.height = 'auto';
-      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+      el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
     }
   }, [value]);
 
@@ -40,85 +38,70 @@ export function MessageInput({ onSend, onStop, isStreaming, disabled }: Props) {
     }
   };
 
+  const canSend = !disabled && !isStreaming && value.trim().length > 0;
+
   return (
-    <div style={styles.container}>
-      <textarea
-        ref={textareaRef}
-        style={styles.textarea}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={handleKeyDown}
-        placeholder={
-          isStreaming ? 'Building...' : 'Describe what you want to build...'
-        }
-        disabled={disabled}
-        rows={1}
-      />
-      <button
-        style={{
-          ...styles.sendBtn,
-          ...(isStreaming ? styles.stopBtn : {}),
-          ...(disabled || (!isStreaming && !value.trim())
-            ? styles.disabledBtn
-            : {}),
-        }}
-        onClick={isStreaming ? onStop : handleSend}
-        disabled={disabled || (!isStreaming && !value.trim())}
+    <div className='input-area'>
+      <div
+        className={`input-wrapper ${isStreaming ? 'input-wrapper--streaming' : ''}`}
       >
-        {isStreaming ? '■' : '↑'}
-      </button>
+        <textarea
+          ref={textareaRef}
+          className='input-textarea'
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={
+            isStreaming
+              ? 'Building your app...'
+              : 'Describe what you want to build...'
+          }
+          disabled={disabled}
+          rows={1}
+        />
+        <div className='input-actions'>
+          {isStreaming ? (
+            <button
+              className='input-btn input-btn--stop'
+              onClick={onStop}
+              title='Stop generation'
+            >
+              <svg
+                width='12'
+                height='12'
+                viewBox='0 0 12 12'
+                fill='currentColor'
+              >
+                <rect x='1' y='1' width='10' height='10' rx='2' />
+              </svg>
+            </button>
+          ) : (
+            <button
+              className={`input-btn input-btn--send ${canSend ? 'input-btn--active' : ''}`}
+              onClick={handleSend}
+              disabled={!canSend}
+              title='Send message'
+            >
+              <svg
+                width='14'
+                height='14'
+                viewBox='0 0 24 24'
+                fill='none'
+                stroke='currentColor'
+                strokeWidth='2.5'
+              >
+                <line x1='12' y1='19' x2='12' y2='5' />
+                <polyline points='5 12 12 5 19 12' />
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+      <p className='input-hint'>
+        {isStreaming
+          ? 'Press Enter or click ■ to stop'
+          : 'Enter to send · Shift+Enter for new line'}
+      </p>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: 'flex',
-    alignItems: 'flex-end',
-    gap: 6,
-    background: 'rgba(255,255,255,0.04)',
-    borderRadius: 10,
-    border: '1px solid var(--vscode-input-border, rgba(255,255,255,0.1))',
-    padding: '6px 6px 6px 12px',
-  },
-  textarea: {
-    flex: 1,
-    background: 'transparent',
-    border: 'none',
-    color: 'var(--vscode-foreground)',
-    fontSize: 13,
-    lineHeight: '1.5',
-    resize: 'none',
-    outline: 'none',
-    fontFamily: 'inherit',
-    minHeight: 24,
-    maxHeight: 200,
-    padding: '2px 0',
-  },
-  sendBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: '50%',
-    border: 'none',
-    background: '#FAD40B',
-    color: '#000',
-    fontSize: 14,
-    fontWeight: 700,
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-    transition: 'opacity 0.15s',
-  },
-  stopBtn: {
-    background: 'rgba(255,255,255,0.1)',
-    color: 'var(--vscode-foreground)',
-    border: '1px solid rgba(255,255,255,0.15)',
-    fontSize: 10,
-  },
-  disabledBtn: {
-    opacity: 0.3,
-    cursor: 'not-allowed',
-  },
-};

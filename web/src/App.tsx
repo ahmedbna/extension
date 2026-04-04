@@ -1,3 +1,6 @@
+// web/src/App.tsx
+// Modern Cursor-like chat UI with shimmer effects and file update dropdowns
+
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   useVSCodeAPI,
@@ -8,160 +11,198 @@ import {
 import { ChatHeader } from './components/ChatHeader';
 import { MessageList } from './components/MessageList';
 import { MessageInput } from './components/MessageInput';
-import { StatusIndicator } from './components/StatusIndicator';
-import { AuthPrompt } from './components/AuthPrompt';
+import { AuthScreen } from './components/AuthScreen';
 
-type StreamStatus = 'ready' | 'streaming' | 'error';
+export type StreamStatus =
+  | 'idle'
+  | 'thinking'
+  | 'streaming'
+  | 'deploying'
+  | 'error';
 
-interface ToolEvent {
+export interface FileWriteEvent {
   id: string;
-  type: 'call' | 'result' | 'file';
-  toolName?: string;
-  filePath?: string;
+  filePath: string;
+  timestamp: number;
+}
+
+export interface ToolCallEvent {
+  id: string;
+  toolCallId: string;
+  toolName: string;
+  status: 'running' | 'done' | 'error';
   result?: string;
-  isError?: boolean;
+  timestamp: number;
 }
 
 export function App() {
   const api = useVSCodeAPI();
-
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null); // null = loading
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [streamStatus, setStreamStatus] = useState<StreamStatus>('ready');
-  const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
+  const [statusText, setStatusText] = useState('');
+  const [fileWrites, setFileWrites] = useState<FileWriteEvent[]>([]);
+  const [toolCalls, setToolCalls] = useState<ToolCallEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const streamingTextRef = useRef('');
   const streamingMsgIdRef = useRef<string | null>(null);
+  const streamingTextRef = useRef('');
 
-  const handleExtensionMessage = useCallback((msg: ExtensionMessage) => {
-    switch (msg.type) {
-      case 'init': {
-        setIsAuthenticated(msg.isAuthenticated);
-        setAuthError(null);
-        if (msg.isAuthenticated && msg.messages?.length) {
-          setMessages(msg.messages);
-        }
-        break;
-      }
-
-      case 'authState': {
-        setIsAuthenticated(msg.isAuthenticated);
-        if (msg.isAuthenticated) {
+  const handleExtensionMessage = useCallback(
+    (msg: ExtensionMessage) => {
+      switch (msg.type) {
+        case 'init': {
+          setIsAuthenticated(msg.isAuthenticated);
           setAuthError(null);
+          if (msg.isAuthenticated && msg.messages?.length) {
+            setMessages(msg.messages);
+          }
+          break;
         }
-        break;
-      }
 
-      case 'authRequired': {
-        // Session expired — show auth screen with message
-        setIsAuthenticated(false);
-        setAuthError(
-          msg.error || 'Your session has expired. Please sign in again.',
-        );
-        setStreamStatus('ready');
-        streamingMsgIdRef.current = null;
-        streamingTextRef.current = '';
-        break;
-      }
+        case 'authState': {
+          setIsAuthenticated(msg.isAuthenticated);
+          if (msg.isAuthenticated) setAuthError(null);
+          break;
+        }
 
-      case 'streamText': {
-        setStreamStatus('streaming');
-        setError(null);
-
-        if (!streamingMsgIdRef.current) {
-          const id = `assistant-${Date.now()}`;
-          streamingMsgIdRef.current = id;
+        case 'authRequired': {
+          setIsAuthenticated(false);
+          setAuthError(msg.error || 'Session expired. Please sign in again.');
+          setStreamStatus('idle');
+          streamingMsgIdRef.current = null;
           streamingTextRef.current = '';
-          setMessages((prev) => [
-            ...prev,
-            { id, role: 'assistant', content: '' },
-          ]);
+          break;
         }
 
-        streamingTextRef.current += msg.text;
-        const currentId = streamingMsgIdRef.current;
-        const currentText = streamingTextRef.current;
+        case 'streamText': {
+          if (streamStatus !== 'streaming') setStreamStatus('streaming');
+          setError(null);
 
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === currentId ? { ...m, content: currentText } : m,
-          ),
-        );
-        break;
-      }
+          if (!streamingMsgIdRef.current) {
+            const id = `assistant-${Date.now()}`;
+            streamingMsgIdRef.current = id;
+            streamingTextRef.current = '';
+            setMessages((prev) => [
+              ...prev,
+              { id, role: 'assistant', content: '' },
+            ]);
+          }
 
-      case 'toolCall': {
-        setToolEvents((prev) => [
-          ...prev,
-          { id: msg.toolCallId, type: 'call', toolName: msg.toolName },
-        ]);
-        break;
-      }
+          streamingTextRef.current += msg.text;
+          const currentId = streamingMsgIdRef.current;
+          const currentText = streamingTextRef.current;
 
-      case 'toolResult': {
-        setToolEvents((prev) => [
-          ...prev,
-          {
-            id: msg.toolCallId,
-            type: 'result',
-            result: msg.result,
-            isError: msg.isError,
-          },
-        ]);
-        break;
-      }
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === currentId ? { ...m, content: currentText } : m,
+            ),
+          );
+          break;
+        }
 
-      case 'fileWrite': {
-        setToolEvents((prev) => [
-          ...prev,
-          { id: `file-${Date.now()}`, type: 'file', filePath: msg.filePath },
-        ]);
-        break;
-      }
+        case 'toolCall': {
+          if (msg.toolName === 'deploy') setStreamStatus('deploying');
+          setStatusText(formatToolStatus(msg.toolName));
+          setToolCalls((prev) => [
+            ...prev,
+            {
+              id: `tc-${Date.now()}`,
+              toolCallId: msg.toolCallId,
+              toolName: msg.toolName,
+              status: 'running',
+              timestamp: Date.now(),
+            },
+          ]);
+          break;
+        }
 
-      case 'streamEnd': {
-        setStreamStatus('ready');
-        streamingMsgIdRef.current = null;
-        streamingTextRef.current = '';
-        setTimeout(() => setToolEvents([]), 3000);
-        break;
-      }
+        case 'toolResult': {
+          setToolCalls((prev) =>
+            prev.map((tc) =>
+              tc.toolCallId === msg.toolCallId
+                ? {
+                    ...tc,
+                    status: msg.isError ? 'error' : 'done',
+                    result: msg.result,
+                  }
+                : tc,
+            ),
+          );
+          break;
+        }
 
-      case 'error': {
-        setStreamStatus('error');
-        setError(msg.error);
-        streamingMsgIdRef.current = null;
-        streamingTextRef.current = '';
-        break;
-      }
+        case 'fileWrite': {
+          setFileWrites((prev) => [
+            ...prev,
+            {
+              id: `fw-${Date.now()}`,
+              filePath: msg.filePath || '',
+              timestamp: Date.now(),
+            },
+          ]);
+          break;
+        }
 
-      case 'chatReset': {
-        setMessages([]);
-        setToolEvents([]);
-        setStreamStatus('ready');
-        setError(null);
-        streamingMsgIdRef.current = null;
-        streamingTextRef.current = '';
-        break;
+        case 'status': {
+          setStatusText(msg.text || '');
+          if (msg.text && streamStatus === 'idle') setStreamStatus('thinking');
+          break;
+        }
+
+        case 'streamEnd': {
+          setStreamStatus('idle');
+          setStatusText('');
+          streamingMsgIdRef.current = null;
+          streamingTextRef.current = '';
+          // Clear tool events after a delay
+          setTimeout(() => {
+            setFileWrites([]);
+            setToolCalls([]);
+          }, 5000);
+          break;
+        }
+
+        case 'error': {
+          setStreamStatus('error');
+          setError(msg.error || 'Something went wrong');
+          streamingMsgIdRef.current = null;
+          streamingTextRef.current = '';
+          break;
+        }
+
+        case 'chatReset': {
+          setMessages([]);
+          setFileWrites([]);
+          setToolCalls([]);
+          setStreamStatus('idle');
+          setStatusText('');
+          setError(null);
+          streamingMsgIdRef.current = null;
+          streamingTextRef.current = '';
+          break;
+        }
       }
-    }
-  }, []);
+    },
+    [streamStatus],
+  );
 
   useExtensionMessages(handleExtensionMessage);
 
   useEffect(() => {
     api.postMessage({ type: 'ready' });
-  }, [api]);
+  }, []);
 
   const handleSend = useCallback(
     (text: string) => {
       const id = `user-${Date.now()}`;
       setMessages((prev) => [...prev, { id, role: 'user', content: text }]);
-      setStreamStatus('streaming');
+      setStreamStatus('thinking');
+      setStatusText('Thinking...');
       setError(null);
-      setToolEvents([]);
+      setFileWrites([]);
+      setToolCalls([]);
       api.sendMessage(text);
     },
     [api],
@@ -169,31 +210,29 @@ export function App() {
 
   const handleStop = useCallback(() => {
     api.stopGeneration();
-    setStreamStatus('ready');
+    setStreamStatus('idle');
+    setStatusText('');
   }, [api]);
 
-  const handleSignIn = useCallback(() => {
-    setAuthError(null);
-    api.signIn();
-  }, [api]);
-
-  // Loading state — show nothing until we know auth status
   if (isAuthenticated === null) {
     return (
-      <div style={styles.loading}>
-        <span style={{ fontSize: 24 }}>⚡</span>
-        <p style={{ opacity: 0.4, fontSize: 12 }}>Loading...</p>
+      <div className='loading-screen'>
+        <div className='loading-logo'>⚡</div>
+        <div className='loading-dots'>
+          <span />
+          <span />
+          <span />
+        </div>
       </div>
     );
   }
 
-  // Not authenticated — show sign in
   if (!isAuthenticated) {
-    return <AuthPrompt onSignIn={handleSignIn} authError={authError} />;
+    return <AuthScreen onSignIn={api.signIn} authError={authError} />;
   }
 
   return (
-    <div style={styles.container}>
+    <div className='app'>
       <ChatHeader
         onNewChat={api.newChat}
         onConnectConvex={api.connectConvex}
@@ -202,58 +241,42 @@ export function App() {
 
       <MessageList
         messages={messages}
-        toolEvents={toolEvents}
-        isStreaming={streamStatus === 'streaming'}
+        toolCalls={toolCalls}
+        fileWrites={fileWrites}
+        streamStatus={streamStatus}
+        statusText={statusText}
+        error={error}
       />
 
-      <div style={styles.bottom}>
-        {(streamStatus === 'streaming' || streamStatus === 'error') && (
-          <StatusIndicator
-            status={streamStatus}
-            error={error}
-            onRetry={() => {
-              const lastUser = [...messages]
-                .reverse()
-                .find((m) => m.role === 'user');
-              if (lastUser) {
-                handleSend(lastUser.content);
-              }
-            }}
-          />
-        )}
-
-        <MessageInput
-          onSend={handleSend}
-          onStop={handleStop}
-          isStreaming={streamStatus === 'streaming'}
-          disabled={false}
-        />
-      </div>
+      <MessageInput
+        onSend={handleSend}
+        onStop={handleStop}
+        isStreaming={streamStatus !== 'idle' && streamStatus !== 'error'}
+        disabled={false}
+      />
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    overflow: 'hidden',
-  },
-  bottom: {
-    flexShrink: 0,
-    padding: '8px 12px 12px',
-    borderTop: '1px solid var(--vscode-widget-border, rgba(255,255,255,0.1))',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-  },
-  loading: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '100vh',
-    gap: 8,
-  },
-};
+function formatToolStatus(toolName: string): string {
+  switch (toolName) {
+    case 'deploy':
+      return 'Deploying to Convex...';
+    case 'npmInstall':
+      return 'Installing packages...';
+    case 'view':
+      return 'Reading file...';
+    case 'edit':
+      return 'Editing file...';
+    case 'lookupDocs':
+      return 'Looking up docs...';
+    case 'lookupConvexDocsTool':
+      return 'Looking up Convex docs...';
+    case 'addEnvironmentVariables':
+      return 'Setting env vars...';
+    case 'getConvexDeploymentName':
+      return 'Getting deployment name...';
+    default:
+      return `Running ${toolName}...`;
+  }
+}

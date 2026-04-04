@@ -1,3 +1,8 @@
+// src/utils/projectSetup.ts
+//
+// Ensures the workspace has a project ready for the AI to work with.
+// Full setup: copy template → npm install → npx convex dev → npx @convex-dev/auth
+
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs/promises';
@@ -8,116 +13,168 @@ import { logger } from './logger';
 
 const execAsync = promisify(exec);
 
-/**
- * Ensures the workspace has a project ready for the AI to work with.
- * 
- * If package.json exists → assumes project is set up.
- * If not → copies the bundled template AND runs npm install.
- * 
- * This replaces the old `ensureTemplateCopied` which didn't install deps.
- */
 export async function ensureProjectReady(): Promise<void> {
   const root = getWorkspaceRoot();
   if (!root) {
-    throw new Error('No workspace folder is open. Please open or create a project folder first.');
+    throw new Error(
+      'No workspace folder is open. Please open or create a project folder first.',
+    );
   }
 
   const packageJsonPath = path.join(root, 'package.json');
 
-  // If package.json already exists, project is already set up
   try {
     await fs.access(packageJsonPath);
-
-    // Also check if node_modules exists - if not, run npm install
+    // Package.json exists — check node_modules
     const nodeModulesPath = path.join(root, 'node_modules');
     try {
       await fs.access(nodeModulesPath);
       return; // Both exist, we're good
     } catch {
-      // node_modules missing - need to install
       logger.info('node_modules missing, running npm install...');
       await runNpmInstall(root);
       return;
     }
   } catch {
-    // package.json doesn't exist - need to copy template
+    // package.json doesn't exist
   }
 
   // Copy template from the extension's bundled templates
   logger.info('No package.json found, copying template...');
 
-  // Find the extension path - we need to search for the templates directory
-  // The extension bundles templates in the 'templates' directory at the extension root
   const extensionPath = findExtensionPath();
   if (!extensionPath) {
     throw new Error(
-      'Could not find BNA extension templates. Try using "BNA: New Project from Template" command instead.'
+      'Could not find BNA extension templates. Try using "BNA: New Project from Template" command instead.',
     );
   }
 
   const templatePath = path.join(extensionPath, 'templates', 'expo-convex');
-  
   try {
     await fs.access(templatePath);
   } catch {
     throw new Error(
-      'Template files not found in extension. Try using "BNA: New Project from Template" command instead.'
+      'Template files not found in extension. Try using "BNA: New Project from Template" command instead.',
     );
   }
 
   await copyDir(templatePath, root);
   logger.info('Template copied successfully');
 
-  // Install dependencies
-  await runNpmInstall(root);
+  // Full setup: install + convex init + auth setup
+  await runFullSetup(root);
+}
+
+async function runFullSetup(cwd: string): Promise<void> {
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'Setting up BNA project...',
+      cancellable: false,
+    },
+    async (progress) => {
+      // Step 1: npm install
+      progress.report({ message: 'Installing dependencies...' });
+      await runNpmInstall(cwd);
+
+      // Step 2: npx convex dev (init, run briefly)
+      progress.report({ message: 'Initializing Convex...' });
+      await runConvexInit(cwd);
+
+      // Step 3: npx @convex-dev/auth -y
+      progress.report({ message: 'Setting up Convex Auth...' });
+      await runConvexAuth(cwd);
+
+      logger.info('Full project setup complete');
+    },
+  );
 }
 
 async function runNpmInstall(cwd: string): Promise<void> {
   try {
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: 'Installing dependencies...',
-        cancellable: false,
+    logger.info('Running npm install...');
+    await execAsync('npm install --legacy-peer-deps', {
+      cwd,
+      timeout: 300_000,
+      env: {
+        ...process.env,
+        npm_config_registry: 'https://registry.npmjs.org/',
       },
-      async () => {
-        await execAsync('npm install --legacy-peer-deps', {
-          cwd,
-          timeout: 300_000, // 5 minutes
-          env: {
-            ...process.env,
-            // Ensure npm uses the right registry
-            npm_config_registry: 'https://registry.npmjs.org/',
-          },
-        });
-        logger.info('npm install completed');
-      },
-    );
+    });
+    logger.info('npm install completed');
   } catch (err: any) {
     logger.warn('npm install failed:', err.message);
     vscode.window.showWarningMessage(
-      'Dependency installation failed. You may need to run `npm install` manually in the terminal.',
+      'Dependency installation failed. You may need to run `npm install` manually.',
     );
-    // Don't throw - let the AI proceed even if install failed
-    // The deploy step will catch missing deps
+  }
+}
+
+async function runConvexInit(cwd: string): Promise<void> {
+  return new Promise((resolve) => {
+    const { spawn } = require('child_process');
+
+    const child = spawn('npx', ['convex', 'dev'], {
+      cwd,
+      env: {
+        ...process.env,
+        CI: 'true',
+        FORCE_COLOR: '0',
+      },
+    });
+
+    // Kill after 30 seconds (enough to initialize)
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      logger.info('Convex init completed (timeout)');
+      resolve();
+    }, 30_000);
+
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+
+    child.on('error', (err: Error) => {
+      clearTimeout(timer);
+      logger.warn('Convex init error (non-fatal):', err.message);
+      resolve();
+    });
+  });
+}
+
+async function runConvexAuth(cwd: string): Promise<void> {
+  try {
+    logger.info('Running Convex Auth setup...');
+    // Pipe yes to accept all prompts
+    await execAsync('echo "y\ny\ny\ny\ny" | npx @convex-dev/auth', {
+      cwd,
+      timeout: 120_000,
+      env: { ...process.env, CI: 'true' },
+      shell: '/bin/sh',
+    });
+    logger.info('Convex Auth setup completed');
+  } catch (err: any) {
+    logger.warn('Convex Auth setup failed (non-fatal):', err.message);
+    // Non-fatal — user can run manually
   }
 }
 
 function findExtensionPath(): string | null {
-  // Try to find the extension from VS Code's extension API
   const ext = vscode.extensions.getExtension('bna.bna-ai');
   if (ext) {
     return ext.extensionPath;
   }
 
-  // Fallback: try common extension development paths
-  // In dev mode, the extension runs from the workspace
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (workspaceFolders) {
     for (const folder of workspaceFolders) {
-      const templatesPath = path.join(folder.uri.fsPath, 'templates', 'expo-convex');
+      const templatesPath = path.join(
+        folder.uri.fsPath,
+        'templates',
+        'expo-convex',
+      );
       try {
-        // Synchronous check during initialization is acceptable
         require('fs').accessSync(templatesPath);
         return folder.uri.fsPath;
       } catch {
@@ -137,10 +194,8 @@ async function copyDir(src: string, dest: string): Promise<void> {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
 
-    // Skip node_modules and .git from template
     if (entry.name === 'node_modules' || entry.name === '.git') continue;
 
-    // Don't overwrite existing files
     try {
       await fs.access(destPath);
       continue; // File exists, skip

@@ -1,17 +1,15 @@
 // src/webview/ChatWebviewProvider.ts
+//
+// Provides the chat webview using the separately-built React app (web/dist/).
+// Bridges stream events from BNAAgent to the webview.
 
 import * as vscode from 'vscode';
 import { BNAAgent, type StreamEvent } from '../agent/BNAAgent';
 import { AuthManager } from '../auth/AuthManager';
 import { CreditsManager } from '../credits/CreditsManager';
-import { WEBVIEW_VIEW_TYPE } from '../constants';
 import { logger } from '../utils/logger';
 import { ensureProjectReady } from '../utils/projectSetup';
 
-/**
- * Provides the chat webview in the VS Code sidebar.
- * Updated to support the direct Anthropic agent with agentic tool loop.
- */
 export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private streamDisposable?: vscode.Disposable;
@@ -204,220 +202,39 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Returns HTML that loads the React webview build.
+   * Falls back to a minimal inline UI if the build isn't available.
+   */
   private getHtmlContent(webview: vscode.Webview): string {
+    const nonce = getNonce();
+
+    // Try to load the built React app
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'web', 'dist', 'index.js'),
     );
     const styleUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'web', 'dist', 'index.css'),
     );
-    const logoUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'bricks.png'),
-    );
-    const convexUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'convex.svg'),
-    );
-    const nonce = getNonce();
 
-    // Try to load the React webview; fall back to inline HTML if not built
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} https:; font-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    style-src ${webview.cspSource} 'unsafe-inline';
+    script-src 'nonce-${nonce}';
+    img-src ${webview.cspSource} https: data:;
+    font-src ${webview.cspSource};
+  ">
   <link rel="stylesheet" href="${styleUri}">
-  <title>BNA Chat</title>
-  <style>
-    :root { --bna-yellow: #FAD40B; --bna-black: #0d0d0f; }
-    body { margin:0;padding:0;background:var(--vscode-sideBar-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);height:100vh;overflow:hidden; }
-    #root { height:100%;display:flex;flex-direction:column; }
-    .bna-auth-screen { display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:32px;text-align:center;gap:8px; }
-    .bna-auth-screen img { width:48px;margin-bottom:8px; }
-    .bna-auth-screen h1 { font-size:24px;font-weight:900;margin:0;letter-spacing:-0.04em; }
-    .bna-auth-screen h2 { font-size:15px;font-weight:600;margin:0;opacity:0.8; }
-    .bna-auth-screen p { font-size:13px;opacity:0.5;max-width:240px;line-height:1.5; }
-    .bna-auth-btn { background:var(--bna-yellow);color:#000;border:none;border-radius:10px;padding:12px 28px;font-weight:700;font-size:14px;cursor:pointer;margin-top:12px; }
-    .bna-auth-btn:hover { opacity:0.9; }
-    .bna-auth-note { font-size:11px;opacity:0.3;margin-top:8px; }
-    .bna-fallback { display:none;flex-direction:column;height:100%; }
-    .bna-fallback.active { display:flex; }
-    .bna-header { display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--vscode-widget-border);flex-shrink:0; }
-    .bna-header-left { display:flex;align-items:center;gap:6px; }
-    .bna-header-left img { width:20px;height:20px; }
-    .bna-header-left span { font-weight:800;font-size:15px;letter-spacing:-0.03em; }
-    .bna-header-right { display:flex;gap:4px; }
-    .bna-header-btn { background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:var(--vscode-foreground);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:13px; }
-    .bna-header-btn:hover { background:rgba(255,255,255,0.1); }
-    .bna-messages { flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:12px; }
-    .bna-msg { padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word; }
-    .bna-msg.user { align-self:flex-end;background:var(--vscode-button-background);color:var(--vscode-button-foreground);max-width:85%;border-radius:12px 12px 2px 12px; }
-    .bna-msg.assistant { align-self:flex-start;background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);max-width:95%;border-radius:2px 12px 12px 12px; }
-    .bna-msg.tool { align-self:flex-start;background:var(--vscode-textBlockQuote-background);border-left:3px solid var(--bna-yellow);font-size:12px;max-width:90%; }
-    .bna-msg.status-msg { align-self:flex-start;background:transparent;opacity:0.5;font-size:11px;padding:2px 12px; }
-    .bna-empty { flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:12px;opacity:0.6; }
-    .bna-empty img { width:48px;opacity:0.5; }
-    .bna-input-area { display:flex;align-items:flex-end;gap:6px;padding:8px 12px 12px;border-top:1px solid var(--vscode-widget-border);background:rgba(255,255,255,0.02); }
-    .bna-input-area textarea { flex:1;resize:none;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);padding:8px;border-radius:8px;font-family:inherit;font-size:13px;min-height:36px;max-height:200px;outline:none; }
-    .bna-input-area textarea:focus { border-color:var(--vscode-focusBorder); }
-    .bna-send-btn { width:32px;height:32px;border-radius:50%;border:none;background:var(--bna-yellow);color:#000;font-weight:700;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0; }
-    .bna-send-btn:hover { opacity:0.9; }
-    .bna-send-btn:disabled { opacity:0.3;cursor:not-allowed; }
-    .bna-send-btn.stop { background:rgba(255,255,255,0.1);color:var(--vscode-foreground);border:1px solid rgba(255,255,255,0.15);font-size:10px; }
-    .bna-status { padding:4px 12px;font-size:11px;color:var(--vscode-descriptionForeground);display:none; }
-    .bna-status.visible { display:block; }
-    .hidden { display:none !important; }
-  </style>
+  <title>BNA</title>
 </head>
 <body>
-  <div id="root">
-    <div class="bna-auth-screen" id="auth-screen">
-      <img src="${logoUri}" alt="BNA" />
-      <h1>BNA</h1>
-      <h2>Build Fullstack Mobile Apps</h2>
-      <p>Sign in to start building Expo + Convex apps with AI</p>
-      <button class="bna-auth-btn" id="sign-in-btn">Sign In to Get Started</button>
-      <span class="bna-auth-note">Opens your browser for secure authentication</span>
-    </div>
-
-    <div class="bna-fallback" id="chat-screen">
-      <div class="bna-header">
-        <div class="bna-header-left">
-          <img src="${logoUri}" alt="BNA" />
-          <span>BNA</span>
-        </div>
-        <div class="bna-header-right">
-          <button class="bna-header-btn" id="btn-connect" title="Connect Convex"><img style="width: 16px; height: 16px;" src="${convexUri}" alt="Convex" /></button>
-          <button class="bna-header-btn" id="btn-new-chat" title="New Chat">💬</button>
-          <button class="bna-header-btn" id="btn-sign-out" title="Sign Out">↪</button>
-        </div>
-      </div>
-
-      <div class="bna-messages" id="messages-container">
-        <div class="bna-empty" id="empty-state">
-          <img src="${logoUri}" alt="BNA" />
-          <p>Build fullstack mobile apps with AI</p>
-          <p style="font-size:12px;">Describe what you want to build below</p>
-        </div>
-      </div>
-
-      <div id="status-bar" class="bna-status"></div>
-
-      <div class="bna-input-area">
-        <textarea id="message-input" placeholder="Describe what you want to build..." rows="1"></textarea>
-        <button class="bna-send-btn" id="send-btn" disabled>↑</button>
-      </div>
-    </div>
-  </div>
-
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    const authScreen = document.getElementById('auth-screen');
-    const chatScreen = document.getElementById('chat-screen');
-    const messagesContainer = document.getElementById('messages-container');
-    const messageInput = document.getElementById('message-input');
-    const sendBtn = document.getElementById('send-btn');
-    const emptyState = document.getElementById('empty-state');
-    const statusBar = document.getElementById('status-bar');
-    const signInBtn = document.getElementById('sign-in-btn');
-
-    let isStreaming = false;
-    let currentAssistantEl = null;
-    let currentAssistantText = '';
-
-    function showScreen(s) {
-      if (s === 'auth') { authScreen.classList.remove('hidden'); chatScreen.classList.remove('active'); chatScreen.classList.add('hidden'); }
-      else { authScreen.classList.add('hidden'); chatScreen.classList.remove('hidden'); chatScreen.classList.add('active'); }
-    }
-    showScreen('auth');
-
-    signInBtn.addEventListener('click', () => { signInBtn.textContent = 'Signing in...'; signInBtn.disabled = true; vscode.postMessage({ type: 'signIn' }); });
-    document.getElementById('btn-connect').addEventListener('click', () => vscode.postMessage({ type: 'connectConvex' }));
-    document.getElementById('btn-new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newChat' }));
-    document.getElementById('btn-sign-out').addEventListener('click', () => vscode.postMessage({ type: 'signOut' }));
-
-    function sendMessage() {
-      const text = messageInput.value.trim();
-      if (!text || isStreaming) return;
-      addMessage('user', text);
-      messageInput.value = '';
-      updateSendBtn();
-      vscode.postMessage({ type: 'sendMessage', text });
-      isStreaming = true;
-      sendBtn.innerHTML = '■';
-      sendBtn.classList.add('stop');
-      sendBtn.disabled = false;
-      setStatus('Thinking...');
-    }
-
-    sendBtn.addEventListener('click', () => { if (isStreaming) { vscode.postMessage({ type: 'stopGeneration' }); stopStreaming(); } else { sendMessage(); } });
-    messageInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (isStreaming) { vscode.postMessage({ type: 'stopGeneration' }); stopStreaming(); } else { sendMessage(); } } });
-    messageInput.addEventListener('input', updateSendBtn);
-
-    function updateSendBtn() { if (!isStreaming) sendBtn.disabled = !messageInput.value.trim(); }
-    function stopStreaming() { isStreaming = false; sendBtn.innerHTML = '↑'; sendBtn.classList.remove('stop'); updateSendBtn(); currentAssistantEl = null; currentAssistantText = ''; setStatus(''); }
-
-    function addMessage(role, text) {
-      if (emptyState) emptyState.style.display = 'none';
-      const el = document.createElement('div');
-      el.className = 'bna-msg ' + role;
-      el.textContent = text;
-      messagesContainer.appendChild(el);
-      messagesContainer.scrollTop = messagesContainer.scrollHeight;
-      return el;
-    }
-
-    function setStatus(text) { statusBar.textContent = text; statusBar.classList.toggle('visible', !!text); }
-
-    window.addEventListener('message', (event) => {
-      const msg = event.data;
-      switch (msg.type) {
-        case 'init':
-          showScreen(msg.isAuthenticated ? 'chat' : 'auth');
-          signInBtn.textContent = 'Sign In to Get Started'; signInBtn.disabled = false;
-          if (msg.messages?.length) { while (messagesContainer.firstChild && messagesContainer.firstChild !== emptyState) messagesContainer.removeChild(messagesContainer.firstChild); msg.messages.forEach(m => addMessage(m.role, m.content)); }
-          break;
-        case 'authState':
-          showScreen(msg.isAuthenticated ? 'chat' : 'auth');
-          signInBtn.textContent = 'Sign In to Get Started'; signInBtn.disabled = false;
-          break;
-        case 'authRequired':
-          showScreen('auth'); signInBtn.textContent = 'Sign In to Continue'; signInBtn.disabled = false; stopStreaming();
-          break;
-        case 'streamText':
-          if (!currentAssistantEl) { currentAssistantEl = addMessage('assistant', ''); currentAssistantText = ''; }
-          currentAssistantText += msg.text;
-          currentAssistantEl.textContent = currentAssistantText;
-          messagesContainer.scrollTop = messagesContainer.scrollHeight;
-          break;
-        case 'toolCall':
-          addMessage('tool', '🔧 ' + (msg.toolName || 'Tool') + '...');
-          setStatus('Running ' + (msg.toolName || 'tool') + '...');
-          break;
-        case 'toolResult':
-          if (msg.isError) addMessage('tool', '❌ Error: ' + (msg.result || '').substring(0, 200));
-          else addMessage('tool', '✅ Done');
-          break;
-        case 'fileWrite':
-          addMessage('tool', '📄 ' + msg.filePath);
-          break;
-        case 'status':
-          setStatus(msg.text || '');
-          break;
-        case 'streamEnd':
-          stopStreaming(); setStatus('Done'); setTimeout(() => setStatus(''), 2000);
-          break;
-        case 'error':
-          addMessage('tool', '❌ ' + msg.error); stopStreaming();
-          break;
-        case 'chatReset':
-          messagesContainer.innerHTML = ''; messagesContainer.appendChild(emptyState); emptyState.style.display = 'flex'; stopStreaming();
-          break;
-      }
-    });
-
-    vscode.postMessage({ type: 'ready' });
-  </script>
+  <div id="root"></div>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
   }
@@ -433,7 +250,8 @@ function getNonce(): string {
   let text = '';
   const chars =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < 32; i++)
+  for (let i = 0; i < 32; i++) {
     text += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
   return text;
 }
