@@ -1,39 +1,57 @@
 // web/src/components/MessageInput.tsx
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 
 interface Props {
+  value: string;
+  onChange: (value: string) => void;
   onSend: (text: string) => void;
   onStop: () => void;
   isStreaming: boolean;
   disabled: boolean;
 }
 
-export function MessageInput({ onSend, onStop, isStreaming, disabled }: Props) {
-  const [value, setValue] = useState('');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+export function MessageInput({
+  value,
+  onChange,
+  onSend,
+  onStop,
+  isStreaming,
+  disabled,
+}: Props) {
+  const ref = useRef<HTMLTextAreaElement>(null);
 
+  // Auto-resize textarea
   useEffect(() => {
-    const el = textareaRef.current;
+    const el = ref.current;
     if (el) {
       el.style.height = 'auto';
-      el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
     }
   }, [value]);
 
-  const handleSend = useCallback(() => {
-    const trimmed = value.trim();
-    if (!trimmed || disabled) return;
-    onSend(trimmed);
-    setValue('');
-  }, [value, disabled, onSend]);
+  // Focus when suggestion populates the field
+  useEffect(() => {
+    if (value && ref.current && document.activeElement !== ref.current) {
+      ref.current.focus();
+      // Move cursor to end
+      const len = ref.current.value.length;
+      ref.current.setSelectionRange(len, len);
+    }
+  }, [value]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const send = useCallback(() => {
+    const t = value.trim();
+    if (!t || disabled || isStreaming) return;
+    onSend(t);
+  }, [value, disabled, isStreaming, onSend]);
+
+  const onKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (isStreaming) {
         onStop();
       } else {
-        handleSend();
+        send();
       }
     }
   };
@@ -42,66 +60,49 @@ export function MessageInput({ onSend, onStop, isStreaming, disabled }: Props) {
 
   return (
     <div className='input-area'>
-      <div
-        className={`input-wrapper ${isStreaming ? 'input-wrapper--streaming' : ''}`}
-      >
+      <div className={`input-box ${isStreaming ? 'input-box--streaming' : ''}`}>
         <textarea
-          ref={textareaRef}
+          ref={ref}
           className='input-textarea'
           value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={handleKeyDown}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKey}
           placeholder={
-            isStreaming
-              ? 'Building your app...'
-              : 'Describe what you want to build...'
+            isStreaming ? 'Generating...' : 'Describe what you want to build...'
           }
           disabled={disabled}
           rows={1}
         />
-        <div className='input-actions'>
-          {isStreaming ? (
-            <button
-              className='input-btn input-btn--stop'
-              onClick={onStop}
-              title='Stop generation'
+        {isStreaming ? (
+          <button className='input-stop-btn' onClick={onStop} title='Stop'>
+            <svg width='10' height='10' viewBox='0 0 10 10' fill='currentColor'>
+              <rect x='1' y='1' width='8' height='8' rx='1.5' />
+            </svg>
+          </button>
+        ) : (
+          <button
+            className={`input-send-btn ${canSend ? 'input-send-btn--active' : ''}`}
+            onClick={send}
+            disabled={!canSend}
+            title='Send'
+          >
+            <svg
+              width='13'
+              height='13'
+              viewBox='0 0 24 24'
+              fill='none'
+              stroke='currentColor'
+              strokeWidth='2.25'
+              strokeLinecap='round'
+              strokeLinejoin='round'
             >
-              <svg
-                width='12'
-                height='12'
-                viewBox='0 0 12 12'
-                fill='currentColor'
-              >
-                <rect x='1' y='1' width='10' height='10' rx='2' />
-              </svg>
-            </button>
-          ) : (
-            <button
-              className={`input-btn input-btn--send ${canSend ? 'input-btn--active' : ''}`}
-              onClick={handleSend}
-              disabled={!canSend}
-              title='Send message'
-            >
-              <svg
-                width='14'
-                height='14'
-                viewBox='0 0 24 24'
-                fill='none'
-                stroke='currentColor'
-                strokeWidth='2.5'
-              >
-                <line x1='12' y1='19' x2='12' y2='5' />
-                <polyline points='5 12 12 5 19 12' />
-              </svg>
-            </button>
-          )}
-        </div>
+              <line x1='12' y1='19' x2='12' y2='5' />
+              <polyline points='5 12 12 5 19 12' />
+            </svg>
+          </button>
+        )}
       </div>
-      <p className='input-hint'>
-        {isStreaming
-          ? 'Press Enter or click ■ to stop'
-          : 'Enter to send · Shift+Enter for new line'}
-      </p>
+      <p className='input-hint'>Enter to send · Shift+Enter for new line</p>
     </div>
   );
 }

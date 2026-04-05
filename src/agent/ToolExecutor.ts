@@ -1,14 +1,15 @@
 // src/agent/ToolExecutor.ts
-//
-// Executes tool calls from the AI agent on the real file system and terminal.
-// Includes smart deploy: TypeScript checking + error fixing loop.
 
 import * as vscode from 'vscode';
 import { TerminalManager } from '../terminal/TerminalManager';
 import { ConvexProjectManager } from '../convex/ConvexProjectManager';
 import { logger } from '../utils/logger';
 import { DocsProvider } from './Docsprovider';
-import { executeEditTool, executeViewTool } from '../tools/FileTools';
+import {
+  executeEditTool,
+  executeFileTool,
+  executeViewTool,
+} from '../tools/FileTools';
 
 export interface ToolCall {
   toolName: string;
@@ -33,6 +34,7 @@ export class ToolExecutor {
   ) {}
 
   async execute(call: ToolCall): Promise<ToolResult> {
+    // Deduplicate identical calls (except view and deploy)
     if (call.toolName !== 'view' && call.toolName !== 'deploy') {
       const callKey = `${call.toolName}:${JSON.stringify(call.args)}`;
       if (this.previousToolCalls.has(callKey)) {
@@ -99,16 +101,30 @@ export class ToolExecutor {
     old: string;
     new: string;
   }): Promise<string> {
-    return executeEditTool(args.path, args.old, args.new);
+    const result = await executeEditTool(args.path, args.old, args.new);
+    // After editing, check TypeScript for this specific file
+    await this.checkFileAfterWrite(args.path);
+    return result;
   }
 
-  // ─── Deploy (Smart) ────────────────────────────────────────────────────
-  //
-  // Flow:
-  // 1. Run npx convex dev --once
-  // 2. Run npx tsc --noEmit to check for TypeScript errors
-  // 3. If errors found, return them so the agent can fix + redeploy
-  // 4. If no errors, start Expo dev server (platform-aware)
+  // ─── TypeScript check for a specific file ─────────────────────────────
+
+  private async checkFileAfterWrite(filePath: string): Promise<void> {
+    try {
+      const errors = await this.terminalManager.checkFileTypeScript(filePath);
+      if (errors.length > 0) {
+        logger.warn(
+          `TypeScript errors in ${filePath}:`,
+          errors.map((e) => e.raw).join('\n'),
+        );
+        // Errors will be caught in the next deploy cycle
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  // ─── Deploy ────────────────────────────────────────────────────────────
 
   private async handleDeploy(): Promise<string> {
     if (this.deployErrorCount >= ToolExecutor.MAX_DEPLOY_ERRORS) {
@@ -123,16 +139,15 @@ export class ToolExecutor {
     if (result.exitCode !== 0) {
       this.deployErrorCount++;
 
-      // Format TypeScript errors for the AI to understand and fix
       if (result.typeErrors && result.typeErrors.length > 0) {
         const errorSummary = result.typeErrors
-          .slice(0, 20) // limit to first 20 errors
+          .slice(0, 20)
           .map((e) => `  ${e.file}:${e.line}:${e.column} - ${e.message}`)
           .join('\n');
 
         return (
           `TypeScript errors found (attempt ${this.deployErrorCount}/${ToolExecutor.MAX_DEPLOY_ERRORS}).\n` +
-          `Please fix these errors and redeploy:\n\n${errorSummary}\n\n` +
+          `Fix these errors and redeploy:\n\n${errorSummary}\n\n` +
           `Full output:\n${result.output}`
         );
       }
@@ -141,7 +156,6 @@ export class ToolExecutor {
     }
 
     this.deployErrorCount = 0;
-
     const platform = this.terminalManager.isMac() ? 'iOS' : 'Android';
     return (
       result.output || `Deployed successfully. Starting Expo on ${platform}...`
@@ -164,7 +178,7 @@ export class ToolExecutor {
 
     if (args.requiresNativeRebuild) {
       const rebuildCmd = this.terminalManager.getExpoRunCommand();
-      output += `\n\n⚠️ Native rebuild required. Run: \`${rebuildCmd}\``;
+      output += `\n\nNative rebuild required. Run: \`${rebuildCmd}\``;
 
       vscode.window
         .showWarningMessage(

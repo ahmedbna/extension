@@ -7,59 +7,48 @@ interface Props {
 }
 
 export function AuthScreen({ onSignIn, authError }: Props) {
-  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [pending, setPending] = useState(false);
 
-  const handleSignIn = () => {
-    setIsSigningIn(true);
+  const handle = () => {
+    setPending(true);
     onSignIn();
-    setTimeout(() => setIsSigningIn(false), 60_000);
+    setTimeout(() => setPending(false), 60_000);
   };
 
   return (
     <div className='auth-screen'>
-      <div className='auth-glow' />
-      <div className='auth-content'>
-        <div className='auth-logo'>
-          <div className='auth-logo-icon'>⚡</div>
-          <span className='auth-logo-text'>BNA</span>
+      <div className='auth-ambient' />
+      <div className='auth-body'>
+        <div className='auth-wordmark'>
+          <div className='auth-wordmark-icon'>B</div>
+          <span className='auth-wordmark-name'>BNA</span>
         </div>
 
-        <div className='auth-headline'>
-          <h1>
-            Build Fullstack
-            <br />
-            Mobile Apps
-          </h1>
-          <p>Expo + Convex + AI — all in one place</p>
+        <div className='auth-copy'>
+          <h2>Build Mobile Apps with AI</h2>
+          <p>Expo + Convex, all from VS Code</p>
         </div>
 
         {authError && (
-          <div className='auth-error'>
-            <span className='auth-error-icon'>⚠</span>
-            <span>{authError}</span>
+          <div className='auth-error-box'>
+            <div className='auth-error-dot' />
+            <span className='auth-error-text'>{authError}</span>
           </div>
         )}
 
-        <button
-          className={`auth-btn ${isSigningIn ? 'auth-btn--loading' : ''}`}
-          onClick={handleSignIn}
-          disabled={isSigningIn}
-        >
-          {isSigningIn ? (
+        <button className='auth-cta' onClick={handle} disabled={pending}>
+          {pending ? (
             <>
-              <span className='auth-btn-spinner' />
+              <span className='auth-cta-spinner' />
               Waiting for browser...
             </>
           ) : (
-            <>
-              <span>Sign In to Get Started</span>
-              <span className='auth-btn-arrow'>→</span>
-            </>
+            'Sign In to Get Started'
           )}
         </button>
 
-        {isSigningIn && (
-          <p className='auth-hint'>
+        {pending && (
+          <p className='auth-subtext'>
             Complete sign-in in your browser, then return here
           </p>
         )}

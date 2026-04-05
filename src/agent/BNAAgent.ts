@@ -1,15 +1,4 @@
 // src/agent/BNAAgent.ts
-//
-// Direct Anthropic Agent — calls the Anthropic Messages API directly,
-// executes tools on the real file system, and deducts credits via Convex.
-//
-// Flow:
-//   1. Fetch Anthropic API key from Convex (extensionKeys table)
-//   2. Build system prompt from bna-agent prompts
-//   3. Call Anthropic Messages API with streaming
-//   4. When tool_use blocks arrive → execute locally → feed tool_result back
-//   5. Loop until stop_reason === 'end_turn'
-//   6. Deduct credits based on token usage
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
@@ -53,7 +42,6 @@ export interface StreamEvent {
   error?: string;
 }
 
-/** Anthropic content block types */
 type TextBlock = { type: 'text'; text: string };
 type ToolUseBlock = { type: 'tool_use'; id: string; name: string; input: any };
 type ToolResultBlock = {
@@ -64,16 +52,12 @@ type ToolResultBlock = {
 };
 type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
 
-/** Anthropic message format */
 interface AnthropicMessage {
   role: 'user' | 'assistant';
   content: string | ContentBlock[];
 }
 
-// Maximum agentic loop iterations to prevent runaway
 const MAX_TOOL_ROUNDS = 25;
-
-// Anthropic model to use
 const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 const MAX_TOKENS = 128000;
 
@@ -89,7 +73,6 @@ export class BNAAgent {
   private artifactParser: StreamingArtifactParser;
   private messageHistory: MessageHistory;
 
-  // Accumulated token usage across the entire conversation turn
   private turnUsage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -135,7 +118,6 @@ export class BNAAgent {
   // ─── Main entry point ────────────────────────────────────────────────────
 
   async sendMessage(userMessage: string): Promise<void> {
-    // Auth gate
     const isAuth = await this.authManager.isAuthenticated();
     if (!isAuth) {
       this._onStreamEvent.fire({
@@ -145,7 +127,9 @@ export class BNAAgent {
       return;
     }
 
-    // Add user message
+    // Refresh the 30-day clock on active use
+    await this.tokenStore.refreshTokenExpiry();
+
     this.messages.push({
       id: crypto.randomUUID(),
       role: 'user',
@@ -163,13 +147,8 @@ export class BNAAgent {
 
     try {
       this._onStreamEvent.fire({ type: 'status', content: 'Thinking...' });
-
-      // Run the agentic loop
       await this.agenticLoop(ANTHROPIC_API_KEY, this.abortController.signal);
-
-      // Deduct credits
       await this.deductCredits();
-
       this._onStreamEvent.fire({ type: 'finish' });
     } catch (err: any) {
       if (err.name === 'AbortError') {
@@ -196,15 +175,10 @@ export class BNAAgent {
 
   // ─── Agentic loop ────────────────────────────────────────────────────────
 
-  /**
-   * The core loop: call Anthropic → if tool_use → execute → feed result → repeat.
-   * Continues until stop_reason is 'end_turn' or we hit MAX_TOOL_ROUNDS.
-   */
   private async agenticLoop(
     apiKey: string,
     signal: AbortSignal,
   ): Promise<void> {
-    // Build the conversation in Anthropic format
     const anthropicMessages: AnthropicMessage[] = this.buildAnthropicMessages();
     const systemPrompt = SystemPromptBuilder.build();
     const tools = SystemPromptBuilder.getToolDefinitions();
@@ -212,7 +186,6 @@ export class BNAAgent {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (signal.aborted) break;
 
-      // Call Anthropic Messages API with streaming
       const result = await this.callAnthropic({
         apiKey,
         system: systemPrompt,
@@ -221,7 +194,6 @@ export class BNAAgent {
         signal,
       });
 
-      // Accumulate usage
       if (result.usage) {
         this.turnUsage.inputTokens += result.usage.input_tokens || 0;
         this.turnUsage.outputTokens += result.usage.output_tokens || 0;
@@ -230,13 +202,11 @@ export class BNAAgent {
         this.turnUsage.cacheRead += result.usage.cache_read_input_tokens || 0;
       }
 
-      // Add assistant message to conversation
       anthropicMessages.push({
         role: 'assistant',
         content: result.contentBlocks,
       });
 
-      // Also track in our internal messages for the webview
       const textContent = result.contentBlocks
         .filter((b): b is TextBlock => b.type === 'text')
         .map((b) => b.text)
@@ -250,12 +220,10 @@ export class BNAAgent {
         });
       }
 
-      // If no tool use, we're done
       if (result.stopReason !== 'tool_use') {
         break;
       }
 
-      // Execute all tool_use blocks
       const toolUseBlocks = result.contentBlocks.filter(
         (b): b is ToolUseBlock => b.type === 'tool_use',
       );
@@ -267,6 +235,7 @@ export class BNAAgent {
       for (const toolUse of toolUseBlocks) {
         if (signal.aborted) break;
 
+        // Pass args along so the webview can show "View schema.ts", "Edit button.tsx" etc.
         this._onStreamEvent.fire({
           type: 'tool-call',
           toolCall: {
@@ -278,7 +247,7 @@ export class BNAAgent {
 
         this._onStreamEvent.fire({
           type: 'status',
-          content: `Running ${formatToolName(toolUse.name)}...`,
+          content: `Running ${formatToolName(toolUse.name, toolUse.input)}...`,
         });
 
         const toolResult = await this.toolExecutor.execute({
@@ -297,9 +266,7 @@ export class BNAAgent {
         });
       }
 
-      // Add tool results as a user message (Anthropic format)
       anthropicMessages.push({ role: 'user', content: toolResultBlocks });
-
       this._onStreamEvent.fire({ type: 'status', content: 'Thinking...' });
     }
   }
@@ -359,10 +326,6 @@ export class BNAAgent {
     return this.processAnthropicSSE(response.body, args.signal);
   }
 
-  /**
-   * Process Anthropic SSE stream and collect content blocks.
-   * Also streams text deltas to the webview in real-time.
-   */
   private async processAnthropicSSE(
     body: ReadableStream<Uint8Array>,
     signal: AbortSignal,
@@ -377,7 +340,6 @@ export class BNAAgent {
     let stopReason = 'end_turn';
     let usage: any = {};
 
-    // Content block tracking
     const contentBlocks: ContentBlock[] = [];
     let currentBlockType: string | null = null;
     let currentText = '';
@@ -408,16 +370,13 @@ export class BNAAgent {
 
           switch (event.type) {
             case 'message_start': {
-              if (event.message?.usage) {
+              if (event.message?.usage)
                 usage = { ...usage, ...event.message.usage };
-              }
               break;
             }
-
             case 'content_block_start': {
               const block = event.content_block;
               currentBlockType = block.type;
-
               if (block.type === 'text') {
                 currentText = block.text || '';
               } else if (block.type === 'tool_use') {
@@ -429,12 +388,10 @@ export class BNAAgent {
               }
               break;
             }
-
             case 'content_block_delta': {
               const delta = event.delta;
               if (delta.type === 'text_delta') {
                 currentText += delta.text;
-                // Stream text through artifact parser → webview
                 const cleanText = this.artifactParser.feed(delta.text);
                 if (cleanText) {
                   this._onStreamEvent.fire({
@@ -447,7 +404,6 @@ export class BNAAgent {
               }
               break;
             }
-
             case 'content_block_stop': {
               if (currentBlockType === 'text') {
                 contentBlocks.push({ type: 'text', text: currentText });
@@ -455,9 +411,8 @@ export class BNAAgent {
               } else if (currentBlockType === 'tool_use' && currentToolUse) {
                 let input = {};
                 try {
-                  if (currentToolUse.inputJson) {
+                  if (currentToolUse.inputJson)
                     input = JSON.parse(currentToolUse.inputJson);
-                  }
                 } catch {
                   logger.warn('Failed to parse tool input JSON');
                 }
@@ -472,17 +427,12 @@ export class BNAAgent {
               currentBlockType = null;
               break;
             }
-
             case 'message_delta': {
-              if (event.delta?.stop_reason) {
+              if (event.delta?.stop_reason)
                 stopReason = event.delta.stop_reason;
-              }
-              if (event.usage) {
-                usage = { ...usage, ...event.usage };
-              }
+              if (event.usage) usage = { ...usage, ...event.usage };
               break;
             }
-
             case 'error': {
               throw new Error(event.error?.message || 'Anthropic stream error');
             }
@@ -491,18 +441,16 @@ export class BNAAgent {
       }
     } finally {
       reader.releaseLock();
-      // Flush any remaining artifact parser buffer
       this.artifactParser.flush();
     }
 
     return { stopReason, contentBlocks, usage };
   }
 
-  // ─── Build Anthropic-format messages ─────────────────────────────────────
+  // ─── Build messages ───────────────────────────────────────────────────────
 
   private buildAnthropicMessages(): AnthropicMessage[] {
     const msgs: AnthropicMessage[] = [];
-
     for (const msg of this.messages) {
       if (msg.role === 'system') continue;
       if (msg.role === 'user') {
@@ -511,7 +459,6 @@ export class BNAAgent {
         msgs.push({ role: 'assistant', content: msg.content });
       }
     }
-
     return msgs;
   }
 
@@ -542,8 +489,7 @@ export class BNAAgent {
 
       if (result) {
         logger.info(
-          `Credits deducted: ${result.creditsDeducted} | Remaining: ${result.remainingCredits} | ` +
-            `Tokens: ${totalInput} in + ${totalOutput} out`,
+          `Credits deducted: ${result.creditsDeducted} | Remaining: ${result.remainingCredits}`,
         );
       }
     } catch (err) {
@@ -608,24 +554,34 @@ export class BNAAgent {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function formatToolName(name: string): string {
+function formatToolName(name: string, args?: any): string {
   switch (name) {
+    case 'view': {
+      if (args?.path) {
+        const parts = String(args.path).split('/');
+        return `View ${parts[parts.length - 1]}`;
+      }
+      return 'View file';
+    }
+    case 'edit': {
+      if (args?.path) {
+        const parts = String(args.path).split('/');
+        return `Edit ${parts[parts.length - 1]}`;
+      }
+      return 'Edit file';
+    }
     case 'deploy':
-      return 'deploy';
+      return 'Deploy';
     case 'npmInstall':
-      return 'npm install';
-    case 'view':
-      return 'view file';
-    case 'edit':
-      return 'edit file';
+      return args?.packages ? `Install ${args.packages}` : 'Install packages';
     case 'lookupDocs':
-      return 'docs lookup';
+      return 'Docs lookup';
     case 'lookupConvexDocsTool':
-      return 'Convex docs lookup';
+      return 'Convex docs';
     case 'addEnvironmentVariables':
-      return 'environment variables';
+      return 'Environment variables';
     case 'getConvexDeploymentName':
-      return 'get deployment name';
+      return 'Get deployment name';
     default:
       return name;
   }

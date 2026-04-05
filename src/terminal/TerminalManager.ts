@@ -1,12 +1,8 @@
 // src/terminal/TerminalManager.ts
-//
-// Updated terminal manager with:
-// 1. Smart deploy: npx convex dev + TypeScript check + fix errors loop
-// 2. Platform detection (mac → ios, otherwise android)
-// 3. Template setup: npm install + npx convex dev + npx @convex-dev/auth
 
 import * as vscode from 'vscode';
 import * as os from 'os';
+import * as path from 'path';
 import { logger } from '../utils/logger';
 import { getWorkspaceRoot } from '../utils/workspace';
 
@@ -56,7 +52,7 @@ export class TerminalManager {
       let output = '';
       const child = exec(command, {
         cwd: root,
-        maxBuffer: 1024 * 1024 * 20, // 20MB
+        maxBuffer: 1024 * 1024 * 20,
         timeout: options?.timeout || 300_000,
         env: {
           ...process.env,
@@ -98,9 +94,8 @@ export class TerminalManager {
     const lines = output.split('\n');
 
     for (const line of lines) {
-      // Match TypeScript error format: file.ts(line,col): error TS1234: message
       const match = line.match(
-        /^(.+)\((\d+),(\d+)\):\s+error\s+(TS\d+:\s+.+)$/,
+        /^(.+?)\((\d+),(\d+)\):\s+error\s+(TS\d+:\s+.+)$/,
       );
       if (match) {
         errors.push({
@@ -116,18 +111,43 @@ export class TerminalManager {
     return errors;
   }
 
-  // ─── Template Setup ────────────────────────────────────────────────────
+  /**
+   * Run TypeScript check on a specific file and return errors.
+   */
+  async checkFileTypeScript(filePath: string): Promise<TypeScriptError[]> {
+    const root = getWorkspaceRoot();
+    if (!root) return [];
+
+    // Get relative path from workspace root
+    const relPath = path.relative(root, filePath);
+
+    const result = await this.executeCommand(
+      'ts-check',
+      `npx tsc --noEmit --pretty false 2>&1 | grep "${relPath.replace(/\\/g, '/')}"`,
+      { timeout: 60_000 },
+    );
+
+    return this.parseTypeScriptErrors(result.output);
+  }
 
   /**
-   * Full template setup:
-   * 1. npm install
-   * 2. npx convex dev (initial deploy)
-   * 3. npx @convex-dev/auth (setup auth, -y to accept all)
+   * Run TypeScript check on all project files and return errors.
    */
+  async checkAllTypeScript(): Promise<TypeScriptError[]> {
+    const result = await this.executeCommand(
+      'ts-check',
+      'npx tsc --noEmit --pretty false 2>&1',
+      { timeout: 120_000 },
+    );
+
+    return this.parseTypeScriptErrors(result.output);
+  }
+
+  // ─── Template Setup ────────────────────────────────────────────────────
+
   async setupTemplate(): Promise<{ success: boolean; output: string }> {
     const outputs: string[] = [];
 
-    // Step 1: npm install
     logger.info('Template setup: running npm install...');
     const install = await this.executeCommand(
       'setup',
@@ -139,15 +159,13 @@ export class TerminalManager {
       return { success: false, output: outputs.join('\n\n') };
     }
 
-    // Step 2: npx convex dev (run briefly to init, then kill)
     logger.info('Template setup: initializing Convex...');
     const convexInit = await this.executeCommandWithTimeout(
       'npx convex dev',
-      30_000, // 30 seconds — enough to init
+      30_000,
     );
     outputs.push('[convex init]\n' + convexInit.output);
 
-    // Step 3: npx @convex-dev/auth -y
     logger.info('Template setup: setting up Convex Auth...');
     const authSetup = await this.executeCommand(
       'setup',
@@ -162,9 +180,6 @@ export class TerminalManager {
     };
   }
 
-  /**
-   * Execute a command with a hard timeout (kills after timeout, treats partial success as ok).
-   */
   private async executeCommandWithTimeout(
     command: string,
     timeoutMs: number,
@@ -193,7 +208,7 @@ export class TerminalManager {
 
       const timer = setTimeout(() => {
         child.kill('SIGTERM');
-        resolve({ exitCode: 0, output }); // treat timeout as success for init
+        resolve({ exitCode: 0, output });
       }, timeoutMs);
 
       child.on('close', (code: number | null) => {
@@ -206,18 +221,15 @@ export class TerminalManager {
   // ─── Smart Deploy ──────────────────────────────────────────────────────
 
   /**
-   * Smart deploy flow:
+   * Smart deploy:
    * 1. npx convex dev --once (deploy backend)
-   * 2. npx tsc --noEmit (check for TypeScript errors)
-   * 3. If errors found, return them for the AI to fix
-   * 4. If no errors, start Expo dev server
-   *
-   * Returns errors if any, so the agent can fix them.
+   * 2. npx tsc --noEmit (check TypeScript)
+   * 3. If errors → return for agent to fix
+   * 4. If clean → start Expo dev server
    */
   async smartDeploy(): Promise<DeployResult> {
-    logger.info('Smart deploy: starting...');
+    logger.info('Smart deploy: starting Convex deploy...');
 
-    // Step 1: Deploy Convex backend
     const convexResult = await this.executeCommand(
       'deploy',
       'npx convex dev --once --typecheck=disable',
@@ -231,7 +243,7 @@ export class TerminalManager {
       };
     }
 
-    // Step 2: TypeScript check
+    logger.info('Smart deploy: running TypeScript check...');
     const tscResult = await this.executeCommand(
       'deploy',
       'npx tsc --noEmit --pretty false 2>&1',
@@ -242,20 +254,19 @@ export class TerminalManager {
 
     if (typeErrors.length > 0 || tscResult.exitCode !== 0) {
       return {
-        exitCode: tscResult.exitCode,
+        exitCode: tscResult.exitCode || 1,
         output: `[TypeScript Errors]\n${tscResult.output}`,
         typeErrors,
       };
     }
 
-    // Step 3: All good — start Expo dev server
+    // All good — start Expo dev server
     const platform = this.isMac() ? 'ios' : 'android';
     logger.info(`Smart deploy: starting Expo on ${platform}...`);
 
-    // Show notification to user
     vscode.window
       .showInformationMessage(
-        `✅ Deployed! Starting Expo on ${platform}...`,
+        `Deployed successfully. Starting Expo on ${platform}...`,
         'Open Terminal',
       )
       .then((choice) => {
@@ -264,7 +275,6 @@ export class TerminalManager {
         }
       });
 
-    // Start expo in background terminal (non-blocking)
     this.startExpoDevServer(platform);
 
     const totalOutput = [convexResult.output, tscResult.output]
@@ -274,13 +284,9 @@ export class TerminalManager {
     return { exitCode: 0, output: totalOutput || 'Deployed successfully.' };
   }
 
-  /**
-   * Convex-only deploy (used by the deploy tool for quick iterations).
-   */
   async convexDeploy(): Promise<CommandResult> {
     logger.info('Running Convex deploy...');
 
-    // Codegen
     const codegen = await this.executeCommand('deploy', 'npx convex codegen', {
       timeout: 60_000,
     });
@@ -291,7 +297,6 @@ export class TerminalManager {
       };
     }
 
-    // Deploy
     const deploy = await this.executeCommand(
       'deploy',
       'npx convex dev --once --typecheck=disable',

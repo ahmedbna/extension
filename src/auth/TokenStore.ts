@@ -2,14 +2,14 @@ import * as vscode from 'vscode';
 import { SECRET_KEYS } from '../constants';
 import { logger } from '../utils/logger';
 
+// 30 days in milliseconds
+const TOKEN_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
+const TOKEN_STORED_AT_KEY = 'bna.tokenStoredAt';
+
 /**
  * Manages secure storage of auth tokens and sensitive data
  * using VS Code's built-in SecretStorage API (backed by the OS keychain).
- *
- * Key improvements over the original:
- * - Token validation (JWT expiry checks)
- * - Event emitter for auth state changes
- * - Atomic bulk storage for OAuth connections
+ * Tokens persist for 30 days.
  */
 export class TokenStore {
   private _onAuthChanged = new vscode.EventEmitter<boolean>();
@@ -24,10 +24,19 @@ export class TokenStore {
       return undefined;
     }
 
-    // Check if token is expired
-    if (this.isTokenExpired(token)) {
-      logger.warn('Convex auth token is expired');
-      // Don't clear automatically — let AuthManager handle refresh
+    // Check 30-day wall-clock expiry (extension-managed)
+    const storedAtStr = await this.secrets.get(TOKEN_STORED_AT_KEY);
+    if (storedAtStr) {
+      const storedAt = parseInt(storedAtStr, 10);
+      if (!isNaN(storedAt) && Date.now() - storedAt > TOKEN_EXPIRY_MS) {
+        logger.warn('BNA auth token expired (30-day limit)');
+        return undefined;
+      }
+    }
+
+    // Also check JWT expiry if it's a JWT
+    if (this.isJwtExpired(token)) {
+      logger.warn('BNA auth JWT is expired');
       return undefined;
     }
 
@@ -43,7 +52,9 @@ export class TokenStore {
 
   async setConvexAuthToken(token: string): Promise<void> {
     await this.secrets.store(SECRET_KEYS.CONVEX_AUTH_TOKEN, token);
-    logger.info('Stored Convex auth token');
+    // Record when we stored it so we can enforce 30-day expiry
+    await this.secrets.store(TOKEN_STORED_AT_KEY, String(Date.now()));
+    logger.info('Stored Convex auth token (30-day expiry)');
     this._onAuthChanged.fire(true);
   }
 
@@ -109,7 +120,8 @@ export class TokenStore {
   }
 
   /**
-   * Check if user has a valid (non-expired) auth token.
+   * Check if user has a valid auth token.
+   * Checks both JWT expiry and the 30-day wall-clock limit.
    */
   async isAuthenticated(): Promise<boolean> {
     const token = await this.getConvexAuthToken();
@@ -118,7 +130,6 @@ export class TokenStore {
 
   /**
    * Check if there's any token stored (even if expired).
-   * Useful for deciding whether to attempt refresh vs fresh login.
    */
   async hasStoredToken(): Promise<boolean> {
     const token = await this.secrets.get(SECRET_KEYS.CONVEX_AUTH_TOKEN);
@@ -130,23 +141,34 @@ export class TokenStore {
     return !!token;
   }
 
+  /**
+   * Refresh the 30-day clock — call this when the user actively uses the extension.
+   */
+  async refreshTokenExpiry(): Promise<void> {
+    const token = await this.secrets.get(SECRET_KEYS.CONVEX_AUTH_TOKEN);
+    if (token) {
+      await this.secrets.store(TOKEN_STORED_AT_KEY, String(Date.now()));
+    }
+  }
+
   async clearAll(): Promise<void> {
-    await Promise.all(
-      Object.values(SECRET_KEYS).map((key) => this.secrets.delete(key)),
-    );
+    await Promise.all([
+      ...Object.values(SECRET_KEYS).map((key) => this.secrets.delete(key)),
+      this.secrets.delete(TOKEN_STORED_AT_KEY),
+    ]);
     logger.info('Cleared all stored tokens');
     this._onAuthChanged.fire(false);
   }
 
   /**
    * Check if a JWT token is expired.
-   * Returns true if expired or if we can't parse it (fail-safe).
+   * Returns false (not expired) for non-JWT tokens — let the 30-day clock handle them.
    */
-  private isTokenExpired(token: string): boolean {
+  private isJwtExpired(token: string): boolean {
     try {
       const parts = token.split('.');
       if (parts.length !== 3) {
-        // Not a JWT — treat as valid (could be an opaque token)
+        // Not a JWT — trust the 30-day clock instead
         return false;
       }
 
@@ -159,11 +181,10 @@ export class TokenStore {
         return false;
       }
 
-      // Add 30-second buffer so we don't use a token that's about to expire
+      // Add 60-second buffer to avoid racing
       const nowSec = Math.floor(Date.now() / 1000);
-      return payload.exp < nowSec + 30;
+      return payload.exp < nowSec + 60;
     } catch {
-      // Can't parse — treat as valid and let the server reject it
       return false;
     }
   }

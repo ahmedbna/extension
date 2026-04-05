@@ -1,14 +1,13 @@
 // src/webview/ChatWebviewProvider.ts
-//
-// Provides the chat webview using the separately-built React app (web/dist/).
-// Bridges stream events from BNAAgent to the webview.
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { BNAAgent, type StreamEvent } from '../agent/BNAAgent';
 import { AuthManager } from '../auth/AuthManager';
 import { CreditsManager } from '../credits/CreditsManager';
 import { logger } from '../utils/logger';
 import { ensureProjectReady } from '../utils/projectSetup';
+import { getWorkspaceRoot } from '../utils/workspace';
 
 export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -97,7 +96,8 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
 
         if (!message.text) return;
 
-        // Ensure project template exists before AI runs
+        this.postMessage({ type: 'status', text: 'Initializing project...' });
+
         try {
           await ensureProjectReady();
         } catch (err: any) {
@@ -108,7 +108,6 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
-        // Run the AI agent
         await this.agent.sendMessage(message.text);
         break;
       }
@@ -149,6 +148,39 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
         vscode.commands.executeCommand('bna.connectConvex');
         break;
 
+      // ── Open file in VS Code editor ──────────────────────────────────────
+      case 'openFile': {
+        if (!message.filePath) break;
+        const rawPath = String(message.filePath);
+        try {
+          const root = getWorkspaceRoot();
+          let fullPath: string;
+
+          if (
+            path.isAbsolute(rawPath) &&
+            !rawPath.startsWith('/home/project')
+          ) {
+            fullPath = rawPath;
+          } else {
+            // Strip the virtual /home/project prefix the AI uses
+            const cleaned = rawPath
+              .replace(/^\/home\/project\/?/, '')
+              .replace(/^\/+/, '');
+            fullPath = root ? path.join(root, cleaned) : rawPath;
+          }
+
+          const uri = vscode.Uri.file(fullPath);
+          await vscode.window.showTextDocument(uri, {
+            preview: false,
+            preserveFocus: false,
+          });
+        } catch (err) {
+          logger.warn(`Could not open file: ${rawPath}`, String(err));
+          vscode.window.showWarningMessage(`Could not open file: ${rawPath}`);
+        }
+        break;
+      }
+
       case 'ready':
         await this.sendInitialState();
         break;
@@ -166,6 +198,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
           type: 'toolCall',
           toolName: event.toolCall?.toolName,
           toolCallId: event.toolCall?.toolCallId,
+          args: event.toolCall?.args,
         });
         break;
 
@@ -202,14 +235,9 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Returns HTML that loads the React webview build.
-   * Falls back to a minimal inline UI if the build isn't available.
-   */
   private getHtmlContent(webview: vscode.Webview): string {
     const nonce = getNonce();
 
-    // Try to load the built React app
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'web', 'dist', 'index.js'),
     );
@@ -243,6 +271,7 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
 interface WebviewMessage {
   type: string;
   text?: string;
+  filePath?: string;
   [key: string]: any;
 }
 

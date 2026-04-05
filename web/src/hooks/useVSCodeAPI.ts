@@ -22,7 +22,7 @@ function getVSCodeAPI(): VSCodeAPI {
 export type ExtensionMessage =
   | { type: 'init'; isAuthenticated: boolean; messages: ChatMsg[] }
   | { type: 'streamText'; text: string }
-  | { type: 'toolCall'; toolName: string; toolCallId: string }
+  | { type: 'toolCall'; toolName: string; toolCallId: string; args?: any }
   | { type: 'toolResult'; toolCallId: string; result: string; isError: boolean }
   | { type: 'fileWrite'; filePath: string }
   | { type: 'streamEnd' }
@@ -72,6 +72,13 @@ export function useVSCodeAPI() {
     postMessage({ type: 'connectConvex' });
   }, [postMessage]);
 
+  const openFile = useCallback(
+    (filePath: string) => {
+      postMessage({ type: 'openFile', filePath });
+    },
+    [postMessage],
+  );
+
   return {
     postMessage,
     sendMessage,
@@ -80,6 +87,7 @@ export function useVSCodeAPI() {
     signOut,
     newChat,
     connectConvex,
+    openFile,
   };
 }
 
